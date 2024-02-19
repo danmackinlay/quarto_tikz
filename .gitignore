@@ -1,6 +1,7 @@
 *.html
 *.pdf
 *_files/
+.DS_Store
 
 /.luarc.json
 # Compiled Lua sources
@@ -43,3 +44,8 @@ luac.out
 *.i*86
 *.x86_64
 *.hex
+
+## rendering cruft
+*.aux
+*.dvi
+*.log
