@@ -2,10 +2,18 @@
 title: "Tikz Example"
 filters:
   - tikz
+format: html
 ---
 
-## Heading
-
-This filter adds formatting to heading text.
+This renders TiKZ diagrams in markdown.
 
 
+```tikz
+\begin{tikzpicture}
+\node[draw, circle] (A) at (0,0) {A};
+\node[draw, circle] (B) at (2,0) {B};
+\node[draw, circle] (C) at (4,0) {C};
+\draw[->] (A) -- (B);
+\draw[->] (B) -- (C);
+\end{tikzpicture}
+```
