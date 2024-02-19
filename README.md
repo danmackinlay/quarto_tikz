@@ -20,4 +20,3 @@ _TODO_: Describe how to use your extension.
 ## Example
 
 Here is the source code for a minimal example: [example.qmd](example.qmd).
-
