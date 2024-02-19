@@ -1,0 +1,11 @@
+---
+title: "Tikz Example"
+filters:
+  - tikz
+---
+
+## Heading
+
+This filter adds formatting to heading text.
+
+
