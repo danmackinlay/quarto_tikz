@@ -49,3 +49,4 @@ luac.out
 *.aux
 *.dvi
 *.log
+/images/

@@ -54,9 +54,11 @@ end
 -- Counter for the diagram files
 local counter = 0
 
-local function tikzToSvg(tikzCode, outputFile)
+local function createTexFile(tikzCode, tmpdir, outputFile)
   local template = [[
     \documentclass[tikz]{standalone}
+    \usepackage{amsmath}
+    \usetikzlibrary{matrix}
     \begin{document}
     \begin{tikzpicture}
     %s
@@ -65,19 +67,35 @@ local function tikzToSvg(tikzCode, outputFile)
   ]]
 
   local texCode = string.format(template, tikzCode)
-  local texFile = outputFile .. ".tex"
-  local dviFile = outputFile .. ".dvi"
-  local svgFile = outputFile .. ".svg"
+  local texFile = pandoc.path.join({ tmpdir, outputFile .. ".tex" })
   local file = io.open(texFile, "w")
   file:write(texCode)
   file:close()
 
-  os.execute("latex -interaction=nonstopmode -output-directory=./ " .. texFile)
+  return texFile
+end
+
+local function tikzToSvg(tikzCode, tmpdir, outputFile)
+  local texFile = createTexFile(tikzCode, tmpdir, outputFile)
+  local dviFile = pandoc.path.join({ tmpdir, outputFile .. ".dvi" })
+  local svgFile = pandoc.path.join({ tmpdir, outputFile .. ".svg" })
+
+  os.execute("latex -interaction=nonstopmode -output-directory=" .. tmpdir .. " " .. texFile)
   os.execute("dvisvgm " .. dviFile .. " -n -o " .. svgFile)
   os.remove(texFile)
   os.remove(dviFile)
 
   return svgFile
+end
+
+local function tikzToPdf(tikzCode, tmpdir, outputFile)
+  local texFile = createTexFile(tikzCode, tmpdir, outputFile)
+  local pdfFile = pandoc.path.join({ tmpdir, outputFile .. ".pdf" })
+
+  os.execute("pdflatex -interaction=nonstopmode -output-directory=" .. tmpdir .. " " .. texFile)
+  os.remove(texFile)
+
+  return pdfFile
 end
 
 local function render_tikz(globalOptions)
@@ -141,15 +159,13 @@ local function render_tikz(globalOptions)
         end
 
         if quarto.doc.isFormat("html") then
-          tikzToSvg(cb.text, tempOutputPath)
+          tikzToSvg(cb.text, tmpdir, options.filename)
         elseif quarto.doc.isFormat("pdf") then
-          os.execute("pdflatex -interaction=nonstopmode -output-directory=" .. tmpdir .. " " .. tempOutputPath .. ".tex")
-          tempOutputPath = tempOutputPath .. ".pdf"
+          tikzToPdf(cb.text, tmpdir, options.filename)
         else
           print("Error: Unsupported format")
           return nil
         end
-
         -- move the file from the temporary directory to the project directory
         if tempOutputPath ~= outputPath then
           os.rename(tempOutputPath, outputPath)

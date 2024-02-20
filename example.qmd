@@ -8,7 +8,7 @@ format: html
 This renders TiKZ diagrams in markdown.
 
 
-```tikz
+```{.tikz embed_mode="link"}
 \begin{tikzpicture}
 \node[draw, circle] (A) at (0,0) {A};
 \node[draw, circle] (B) at (2,0) {B};
