@@ -54,19 +54,37 @@ end
 -- Counter for the diagram files
 local counter = 0
 
-local function createTexFile(tikzCode, tmpdir, outputFile)
+local function createTexFile(tikzCode, tmpdir, outputFile, scale, libraries)
+  scale = scale or 1          -- Default scale is 1 if not provided
+  local defaultLibraries = { "arrows", "fit", "shapes" }
+  libraries = libraries or "" -- Default libraries is an empty string if not provided
+
+  -- Split the libraries string into a table
+  local providedLibraries = {}
+  for lib in string.gmatch(libraries, '([^,]+)') do
+    table.insert(providedLibraries, lib)
+  end
+
+  -- Append the provided libraries to the default set
+  for _, lib in ipairs(providedLibraries) do
+    table.insert(defaultLibraries, lib)
+  end
+
   local template = [[
     \documentclass[tikz]{standalone}
     \usepackage{amsmath}
-    \usetikzlibrary{matrix}
+    \usetikzlibrary{%s}
     \begin{document}
-    \begin{tikzpicture}
+    \begin{tikzpicture}[scale=%s, transform shape]
     %s
     \end{tikzpicture}
     \end{document}
   ]]
 
-  local texCode = string.format(template, tikzCode)
+  -- Create a comma-separated string of library names
+  local libraryNames = table.concat(defaultLibraries, ",")
+
+  local texCode = string.format(template, libraryNames, scale, tikzCode)
   local texFile = pandoc.path.join({ tmpdir, outputFile .. ".tex" })
   local file = io.open(texFile, "w")
   file:write(texCode)
@@ -75,8 +93,8 @@ local function createTexFile(tikzCode, tmpdir, outputFile)
   return texFile
 end
 
-local function tikzToSvg(tikzCode, tmpdir, outputFile)
-  local texFile = createTexFile(tikzCode, tmpdir, outputFile)
+local function tikzToSvg(tikzCode, tmpdir, outputFile, scale, libraries)
+  local texFile = createTexFile(tikzCode, tmpdir, outputFile, scal, libraries)
   local dviFile = pandoc.path.join({ tmpdir, outputFile .. ".dvi" })
   local svgFile = pandoc.path.join({ tmpdir, outputFile .. ".svg" })
 
@@ -88,8 +106,8 @@ local function tikzToSvg(tikzCode, tmpdir, outputFile)
   return svgFile
 end
 
-local function tikzToPdf(tikzCode, tmpdir, outputFile)
-  local texFile = createTexFile(tikzCode, tmpdir, outputFile)
+local function tikzToPdf(tikzCode, tmpdir, outputFile, scale, libraries)
+  local texFile = createTexFile(tikzCode, tmpdir, outputFile, scale, libraries)
   local pdfFile = pandoc.path.join({ tmpdir, outputFile .. ".pdf" })
 
   os.execute("pdflatex -interaction=nonstopmode -output-directory=" .. tmpdir .. " " .. texFile)
@@ -159,9 +177,9 @@ local function render_tikz(globalOptions)
         end
 
         if quarto.doc.isFormat("html") then
-          tikzToSvg(cb.text, tmpdir, options.filename)
+          tikzToSvg(cb.text, tmpdir, options.filename, options.scale, options.libraries)
         elseif quarto.doc.isFormat("pdf") then
-          tikzToPdf(cb.text, tmpdir, options.filename)
+          tikzToPdf(cb.text, tmpdir, options.filename, options.scale, options.libraries)
         else
           print("Error: Unsupported format")
           return nil

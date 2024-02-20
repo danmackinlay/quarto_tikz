@@ -8,12 +8,12 @@ format: html
 This renders TiKZ diagrams in markdown.
 
 
-```{.tikz embed_mode="link"}
-\begin{tikzpicture}
+```{.tikz embed_mode="link" scale=3}
 \node[draw, circle] (A) at (0,0) {A};
 \node[draw, circle] (B) at (2,0) {B};
 \node[draw, circle] (C) at (4,0) {C};
+\node[draw, circle] (seven) at (5,0) {7};
 \draw[->] (A) -- (B);
 \draw[->] (B) -- (C);
-\end{tikzpicture}
+\draw[->] (C) -- (A);
 ```
