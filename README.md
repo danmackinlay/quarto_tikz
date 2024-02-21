@@ -4,9 +4,8 @@ Render [PGF/TikZ](https://en.wikipedia.org/wiki/PGF/TikZ) diagrams in [Quarto](h
 
 ## Installing
 
-
 ```bash
-quarto add danmackinlay/tikz
+quarto add danmackinlay/quarto_tikz
 ```
 
 This will install the extension under the `_extensions` subdirectory.
@@ -36,6 +35,12 @@ Note that _if ghostscript is not installed on your system it will fail to render
 ## Example
 
 Here is the source code for a minimal example: [example.qmd](example.qmd).
+
+## PDF output
+
+This does produce PDFs which can be included in PDF output; I wonder if we could shortcut the PDF rendering and just render as plain LaTeX in that case?
+I’m not suite sure how to handle the TikZ libraries in that case.
+Pull requests welcome.
 
 ## Credits
 
