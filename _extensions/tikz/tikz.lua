@@ -71,14 +71,14 @@ local function createTexFile(tikzCode, tmpdir, outputFile, scale, libraries)
   end
 
   local template = [[
-    \documentclass[tikz]{standalone}
-    \usepackage{amsmath}
-    \usetikzlibrary{%s}
-    \begin{document}
-    \begin{tikzpicture}[scale=%s, transform shape]
-    %s
-    \end{tikzpicture}
-    \end{document}
+\documentclass[tikz]{standalone}
+\usepackage{amsmath}
+\usetikzlibrary{%s}
+\begin{document}
+\begin{tikzpicture}[scale=%s, transform shape]
+%s
+\end{tikzpicture}
+\end{document}
   ]]
 
   -- Create a comma-separated string of library names
@@ -87,6 +87,8 @@ local function createTexFile(tikzCode, tmpdir, outputFile, scale, libraries)
   local texCode = string.format(template, libraryNames, scale, tikzCode)
   local texFile = pandoc.path.join({ tmpdir, outputFile .. ".tex" })
   local file = io.open(texFile, "w")
+  debugPrint(texCode)
+  print(texCode)
   file:write(texCode)
   file:close()
 
@@ -94,15 +96,17 @@ local function createTexFile(tikzCode, tmpdir, outputFile, scale, libraries)
 end
 
 local function tikzToSvg(tikzCode, tmpdir, outputFile, scale, libraries)
-  local texFile = createTexFile(tikzCode, tmpdir, outputFile, scal, libraries)
+  local texFile = createTexFile(tikzCode, tmpdir, outputFile, scale, libraries)
   local dviFile = pandoc.path.join({ tmpdir, outputFile .. ".dvi" })
   local svgFile = pandoc.path.join({ tmpdir, outputFile .. ".svg" })
 
-  os.execute("latex -interaction=nonstopmode -output-directory=" .. tmpdir .. " " .. texFile)
-  os.execute("dvisvgm " .. dviFile .. " -n -o " .. svgFile)
+  -- os.execute("latex -interaction=nonstopmode -output-directory=" .. tmpdir .. " " .. texFile)
+  os.execute("latexmk -dvi -output-directory=" .. tmpdir .. " " .. texFile)
+  os.execute("dvisvgm --font-format=woff " .. dviFile .. " -n -o " .. svgFile)
+  os.execute("dvipdfm " .. dviFile .. " -o " .. svgFile .. ".pdf")
+  -- I don't think we actually need to remove output files, the whole tmpdir is delted
   os.remove(texFile)
   os.remove(dviFile)
-
   return svgFile
 end
 
@@ -110,7 +114,8 @@ local function tikzToPdf(tikzCode, tmpdir, outputFile, scale, libraries)
   local texFile = createTexFile(tikzCode, tmpdir, outputFile, scale, libraries)
   local pdfFile = pandoc.path.join({ tmpdir, outputFile .. ".pdf" })
 
-  os.execute("pdflatex -interaction=nonstopmode -output-directory=" .. tmpdir .. " " .. texFile)
+  -- os.execute("pdflatex -interaction=nonstopmode -output-directory=" .. tmpdir .. " " .. texFile)
+  os.execute("latexmk -pdf -output-directory=" .. tmpdir .. " " .. texFile)
   os.remove(texFile)
 
   return pdfFile
@@ -166,7 +171,6 @@ local function render_tikz(globalOptions)
       local result = pandoc.system.with_temporary_directory('tikz-convert', function(tmpdir)
         local outputPath
         local tempOutputPath
-
         if options.folder ~= nil then
           os.execute("mkdir -p " .. options.folder)
           tempOutputPath = pandoc.path.join({ tmpdir, options.filename .. "." .. options.format })

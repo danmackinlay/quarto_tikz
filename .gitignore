@@ -50,3 +50,6 @@ luac.out
 *.dvi
 *.log
 /images/
+*.fdb_latexmk
+*.fls
+*.tex
