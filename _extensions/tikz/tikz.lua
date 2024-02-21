@@ -152,8 +152,9 @@ local function render_tikz(globalOptions)
 
       -- Set default filename
       if options.filename == nil then
-        options.filename = "tikz-output-" .. counter
+        options.filename = "tikz-output"
       end
+      options.filename = options.filename .. "-" .. counter
 
       -- Set the default format to pdf since svg is not supported in PDF output
       if options.format == TikzFormat.svg and quarto.doc.is_format("latex") then
@@ -252,7 +253,7 @@ function Pandoc(doc)
   local options = {
     format = TikzFormat.svg,
     folder = nil,
-    filename = nil,
+    filename = pandoc.utils.stringify(doc.meta.slug or "tikz-output"),
     caption = '',
     width = nil,
     height = nil,

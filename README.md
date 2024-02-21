@@ -17,7 +17,7 @@ If you're using version control, you will want to check in this directory.
 Create a code block with class `.tikz`.
 
 ````qmd
-```{.tikz embed_mode="link" scale=3}
+```{.tikz embed_mode="link" scale=3 filename="example" format="svg"}
 \node[draw, circle] (A) at (0,0) {A};
 \node[draw, circle] (B) at (2,2) {B};
 \node[draw, circle] (C) at (4,0) {C};
@@ -27,13 +27,15 @@ Create a code block with class `.tikz`.
 \draw[->] (C) -- (A);
 ```
 ````
+This should appear in the output as an image
+
+![](./images/example-1.svg)
 
 Note that _if ghostscript is not installed on your system it will fail to render SVGs_.
 
 ## Example
 
 Here is the source code for a minimal example: [example.qmd](example.qmd).
-
 
 ## Credits
 
