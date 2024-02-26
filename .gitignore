@@ -53,3 +53,4 @@ luac.out
 *.fdb_latexmk
 *.fls
 *.tex
+_tikz_cache

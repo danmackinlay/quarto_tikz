@@ -55,16 +55,19 @@ Pull requests welcome.
 
 ## Efficiency
 
-This filter is not particularly efficient, as it has no execution caching;
-A better implementation would include a whole tikz language engine.
-That feels like a lot more work than I can justify for the current project.
+~~This filter is not particularly efficient, as it has no execution caching;~~
+This filter has optional execution caching.
+If you use that make sure you clean it up occasionally, as it will fill up your disk with diagrams.
 
-Not that `dvisvgm` supports a cache via the `--cache` option, and that latex can be fairly good at caching if we allow the intermediate files to persist; maybe we could even exploit quarto infrastructure to do so?
+A better implementation would use a language cache like other engines in quarto.
+However, developing a a whole tikz language engine feels like a lot more work than I can justify for the current project.
+
+Other optimisations might be possible.
+Note that `dvisvgm` supports a cache via the `--cache` option, and that latex can be fairly good at caching if we allow the intermediate files to persist.
 
 Pull requests for that issue also welcome.
 
 ## Credits
 
 Created by cribbing the tricks from [knitr/inst/examples/knitr-graphics.Rnw ](https://github.com/yihui/knitr/blob/master/R/engine.R#L348) and [quarto-d2/\_extensions/d2/d2.lua](https://github.com/data-intuitive/quarto-d2/blob/main/_extensions/d2/d2.lua).
-
-After spending 2 days of my getting this working, I found that [there is a worked example of a tikz filterin pandoc](https://pandoc.org/lua-filters.html#building-images-with-tikz).
+After spending 2 days of my life getting this working, I found that [there is a worked example of a tikz filter in pandoc itself](https://pandoc.org/lua-filters.html#building-images-with-tikz).
