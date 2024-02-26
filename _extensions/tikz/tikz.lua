@@ -100,11 +100,16 @@ local function tikzToSvg(tikzCode, tmpdir, outputFile, scale, libraries)
   local dviFile = pandoc.path.join({ tmpdir, outputFile .. ".dvi" })
   local svgFile = pandoc.path.join({ tmpdir, outputFile .. ".svg" })
 
-  -- os.execute("latex -interaction=nonstopmode -output-directory=" .. tmpdir .. " " .. texFile)
-  os.execute("latexmk -dvi -output-directory=" .. tmpdir .. " " .. texFile)
-  os.execute("dvisvgm --font-format=woff " .. dviFile .. " -n -o " .. svgFile)
-  os.execute("dvipdfm " .. dviFile .. " -o " .. svgFile .. ".pdf")
-  -- I don't think we actually need to remove output files, the whole tmpdir is delted
+  local _, _, latexmkExitCode = os.execute("latexmk -dvi -output-directory=" .. tmpdir .. " " .. texFile)
+  if latexmkExitCode ~= 0 then
+    error("latexmk failed with exit code " .. latexmkExitCode)
+  end
+
+  local _, _, dvisvgmExitCode = os.execute("dvisvgm --font-format=woff " .. dviFile .. " -n -o " .. svgFile)
+  if dvisvgmExitCode ~= 0 then
+    error("dvisvgm failed with exit code " .. dvisvgmExitCode)
+  end
+
   os.remove(texFile)
   os.remove(dviFile)
   return svgFile
@@ -114,10 +119,12 @@ local function tikzToPdf(tikzCode, tmpdir, outputFile, scale, libraries)
   local texFile = createTexFile(tikzCode, tmpdir, outputFile, scale, libraries)
   local pdfFile = pandoc.path.join({ tmpdir, outputFile .. ".pdf" })
 
-  -- os.execute("pdflatex -interaction=nonstopmode -output-directory=" .. tmpdir .. " " .. texFile)
-  os.execute("latexmk -pdf -output-directory=" .. tmpdir .. " " .. texFile)
-  os.remove(texFile)
+  local _, _, latexmkExitCode = os.execute("latexmk -pdf -output-directory=" .. tmpdir .. " " .. texFile)
+  if latexmkExitCode ~= 0 then
+    error("latexmk failed with exit code " .. latexmkExitCode)
+  end
 
+  os.remove(texFile)
   return pdfFile
 end
 
