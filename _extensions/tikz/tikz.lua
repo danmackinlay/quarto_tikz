@@ -128,110 +128,103 @@ local function tikzToPdf(tikzCode, tmpdir, outputFile, scale, libraries)
   return pdfFile
 end
 
-local function render_tikz(globalOptions)
-  local filter = {
+-- Initializes and processes the options for the TikZ code block
+local function processOptions(cb, globalOptions)
+  local options = copyTable(globalOptions)
+
+  -- Process codeblock attributes
+  for k, v in pairs(cb.attributes) do
+    options[k] = v
+  end
+
+  -- Transform options
+  if options.format ~= nil and type(options.format) == "string" then
+    assert(TikzFormat[options.format] ~= nil,
+      "Invalid format: " .. options.format .. ". Options are: " .. serialize(TikzFormat))
+    options.format = TikzFormat[options.format]
+  end
+  if options.embed_mode ~= nil and type(options.embed_mode) == "string" then
+    assert(EmbedMode[options.embed_mode] ~= nil,
+      "Invalid embed_mode: " .. options.embed_mode .. ". Options are: " .. serialize(EmbedMode))
+    options.embed_mode = EmbedMode[options.embed_mode]
+  end
+
+  -- Set default values
+  options.filename = (options.filename or "tikz-output") .. "-" .. counter
+  if options.format == TikzFormat.svg and quarto.doc.is_format("latex") then
+    options.format = TikzFormat.pdf
+  end
+  if not quarto.doc.is_format("html") or options.format == TikzFormat.pdf then
+    options.embed_mode = EmbedMode.link
+  end
+  if options.folder == nil and options.embed_mode == EmbedMode.link then
+    options.folder = "./images"
+  end
+
+  return options
+end
+
+-- Renders the TikZ code block and returns the result path or data
+local function renderTikz(cb, options, tmpdir)
+  local outputPath, tempOutputPath
+  if options.folder ~= nil then
+    os.execute("mkdir -p " .. options.folder)
+    tempOutputPath = pandoc.path.join({ tmpdir, options.filename .. "." .. options.format })
+    outputPath = options.folder .. "/" .. options.filename .. "." .. options.format
+  else
+    tempOutputPath = pandoc.path.join({ tmpdir, options.filename .. "." .. options.format })
+    outputPath = tempOutputPath
+  end
+
+  if quarto.doc.isFormat("html") then
+    tikzToSvg(cb.text, tmpdir, options.filename, options.scale, options.libraries)
+  elseif quarto.doc.isFormat("pdf") then
+    tikzToPdf(cb.text, tmpdir, options.filename, options.scale, options.libraries)
+  else
+    print("Error: Unsupported format")
+    return nil
+  end
+
+  if tempOutputPath ~= outputPath then
+    os.rename(tempOutputPath, outputPath)
+  end
+
+  if options.embed_mode == EmbedMode.link then
+    return outputPath
+  else
+    local file = io.open(outputPath, "rb")
+    local data = file and file:read('*all')
+    if file then file:close() end
+    os.remove(outputPath)
+
+    if options.embed_mode == EmbedMode.raw then
+      return data
+    elseif options.embed_mode == EmbedMode.inline then
+      local mimeType = (options.format == "svg" and "image/svg+xml") or "application/pdf"
+      return "data:" .. mimeType .. ";base64," .. quarto.base64.encode(data)
+    else
+      debugLog("Error: Unsupported format")
+      return nil
+    end
+  end
+end
+
+-- Main function to create the TikZ filter
+local function tikz_walker(globalOptions)
+  return {
     CodeBlock = function(cb)
       if not cb.classes:includes('tikz') or cb.text == nil then
         return nil
       end
 
       counter = counter + 1
+      local options = processOptions(cb, globalOptions)
 
-      -- Initialise options table
-      local options = copyTable(globalOptions)
-
-      -- Process codeblock attributes
-      for k, v in pairs(cb.attributes) do
-        options[k] = v
-      end
-
-      -- Transform options
-      if options.format ~= nil and type(options.format) == "string" then
-        assert(TikzFormat[options.format] ~= nil,
-          "Invalid format: " .. options.format .. ". Options are: " .. serialize(TikzFormat))
-        options.format = TikzFormat[options.format]
-      end
-      if options.embed_mode ~= nil and type(options.embed_mode) == "string" then
-        assert(EmbedMode[options.embed_mode] ~= nil,
-          "Invalid embed_mode: " .. options.embed_mode .. ". Options are: " .. serialize(EmbedMode))
-        options.embed_mode = EmbedMode[options.embed_mode]
-      end
-
-      -- Set default filename
-      if options.filename == nil then
-        options.filename = "tikz-output"
-      end
-      options.filename = options.filename .. "-" .. counter
-
-      -- Set the default format to pdf since svg is not supported in PDF output
-      if options.format == TikzFormat.svg and quarto.doc.is_format("latex") then
-        options.format = TikzFormat.pdf
-      end
-      -- Set the default embed_mode to link if the quarto format is not html or the figure format is pdf
-      if not quarto.doc.is_format("html") or options.format == TikzFormat.pdf then
-        options.embed_mode = EmbedMode.link
-      end
-
-      -- Set the default folder to ./images when embed_mode is link
-      if options.folder == nil and options.embed_mode == EmbedMode.link then
-        options.folder = "./images"
-      end
       local result = pandoc.system.with_temporary_directory('tikz-convert', function(tmpdir)
-        local outputPath
-        local tempOutputPath
-        if options.folder ~= nil then
-          os.execute("mkdir -p " .. options.folder)
-          tempOutputPath = pandoc.path.join({ tmpdir, options.filename .. "." .. options.format })
-          outputPath = options.folder .. "/" .. options.filename .. "." .. options.format
-        else
-          tempOutputPath = pandoc.path.join({ tmpdir, options.filename .. "." .. options.format })
-          outputPath = tempOutputPath
-        end
-
-        if quarto.doc.isFormat("html") then
-          tikzToSvg(cb.text, tmpdir, options.filename, options.scale, options.libraries)
-        elseif quarto.doc.isFormat("pdf") then
-          tikzToPdf(cb.text, tmpdir, options.filename, options.scale, options.libraries)
-        else
-          print("Error: Unsupported format")
-          return nil
-        end
-        -- move the file from the temporary directory to the project directory
-        if tempOutputPath ~= outputPath then
-          os.rename(tempOutputPath, outputPath)
-        end
-
-        if options.embed_mode == EmbedMode.link then
-          return outputPath
-        else
-          local file = io.open(outputPath, "rb")
-          local data
-          if file then
-            data = file:read('*all')
-            file:close()
-          end
-          os.remove(outputPath)
-
-          if options.embed_mode == EmbedMode.raw then
-            return data
-          elseif options.embed_mode == EmbedMode.inline then
-            if options.format == "svg" then
-              return "data:image/svg+xml;base64," .. quarto.base64.encode(data)
-            elseif options.format == "pdf" then
-              return "data:application/pdf;base64," .. quarto.base64.encode(data)
-            else
-              debugLog("Error: Unsupported format")
-              return nil
-            end
-          end
-        end
+        return renderTikz(cb, options, tmpdir)
       end)
 
-      local caption
-      if options.caption ~= '' then
-        caption = { pandoc.Str(options.caption) }
-      end
-      
+      local caption = options.caption ~= '' and { pandoc.Str(options.caption) } or nil
       local figure = pandoc.Figure({ pandoc.Image({}, result) }, caption)
       if options.width ~= nil then
         figure.content[1].attributes.width = options.width
@@ -243,7 +236,6 @@ local function render_tikz(globalOptions)
       return figure
     end
   }
-  return filter
 end
 
 function Pandoc(doc)
@@ -265,5 +257,5 @@ function Pandoc(doc)
     end
   end
 
-  return doc:walk(render_tikz(options))
+  return doc:walk(tikz_walker(options))
 end
