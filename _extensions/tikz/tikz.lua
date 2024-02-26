@@ -228,27 +228,17 @@ local function render_tikz(globalOptions)
       end)
 
       local output
-      if options.embed_mode == EmbedMode.raw then
-        output = pandoc.Div({ pandoc.RawInline("html", result) })
-        if options.width ~= nil then
-          output.attributes.style = "width: " .. options.width .. ";"
-        end
-        if options.height ~= nil then
-          output.attributes.style = output.attributes.style .. "height: " .. options.height .. ";"
-        end
-      else
-        local image = pandoc.Image({}, result)
-        if options.width ~= nil then
-          image.attributes.width = options.width
-        end
-        if options.height ~= nil then
-          image.attributes.height = options.height
-        end
-        if options.caption ~= '' then
-          image.caption = pandoc.Str(options.caption)
-        end
-        output = pandoc.Para({ image })
+      local image = pandoc.Image({}, result)
+      if options.width ~= nil then
+        image.attributes.width = options.width
       end
+      if options.height ~= nil then
+        image.attributes.height = options.height
+      end
+      if options.caption ~= '' then
+        image.caption = pandoc.Str(options.caption)
+      end
+      output = pandoc.Para({ image })
 
       return output
     end
