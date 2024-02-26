@@ -100,7 +100,7 @@ local function tikzToSvg(tikzCode, tmpdir, outputFile, scale, libraries)
   local dviFile = pandoc.path.join({ tmpdir, outputFile .. ".dvi" })
   local svgFile = pandoc.path.join({ tmpdir, outputFile .. ".svg" })
 
-  local _, _, latexExitCode = ("latex -interaction=nonstopmode -output-directory=" .. tmpdir .. " " .. texFile)
+  local _, _, latexExitCode = os.execute("latex -interaction=nonstopmode -output-directory=" .. tmpdir .. " " .. texFile)
   if latexExitCode ~= 0 then
     error("latex failed with exit code " .. latexExitCode)
   end
