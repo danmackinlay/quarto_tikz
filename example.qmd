@@ -8,9 +8,9 @@ format: html
 This renders TiKZ diagrams in markdown.
 
 
-```{.tikz embed_mode="link" scale=3 filename="example" format="svg"}
+```{.tikz embed_mode="link" scale=3 filename="example" format="svg" caption="Rendering TikZ DAGs is easy"}
 \node[draw, circle] (A) at (0,0) {A};
-\node[draw, circle] (B) at (2,2) {B};
+\node[draw, circle] (B) at (2,2) {$\phi$};
 \node[draw, circle] (C) at (4,0) {C};
 \node[draw, circle] (seven) at (5,1) {888888};
 \draw[->] (A) -- (B);

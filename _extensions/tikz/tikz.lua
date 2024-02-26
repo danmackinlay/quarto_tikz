@@ -227,20 +227,20 @@ local function render_tikz(globalOptions)
         end
       end)
 
-      local output
-      local image = pandoc.Image({}, result)
+      local caption
+      if options.caption ~= '' then
+        caption = { pandoc.Str(options.caption) }
+      end
+      
+      local figure = pandoc.Figure({ pandoc.Image({}, result) }, caption)
       if options.width ~= nil then
-        image.attributes.width = options.width
+        figure.content[1].attributes.width = options.width
       end
       if options.height ~= nil then
-        image.attributes.height = options.height
+        figure.content[1].attributes.height = options.height
       end
-      if options.caption ~= '' then
-        image.caption = pandoc.Str(options.caption)
-      end
-      output = pandoc.Para({ image })
 
-      return output
+      return figure
     end
   }
   return filter
