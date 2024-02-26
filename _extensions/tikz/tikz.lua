@@ -139,6 +139,7 @@ local function tikzToPdf(tikzCode, tmpdir, outputFile, scale, libraries)
 end
 
 -- Initializes and processes the options for the TikZ code block
+-- Initializes and processes the options for the TikZ code block
 local function processOptions(cb, globalOptions)
   local options = copyTable(globalOptions)
 
@@ -170,6 +171,9 @@ local function processOptions(cb, globalOptions)
   if options.folder == nil and options.embed_mode == EmbedMode.link then
     options.folder = "./images"
   end
+
+  -- Set cache path from document options
+  options.cache = options.cache or nil
 
   return options
 end
