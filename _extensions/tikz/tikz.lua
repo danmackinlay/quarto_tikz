@@ -41,12 +41,16 @@ local function serialize(obj, indentLevel)
   end
 end
 
-local function debugPrint(obj)
-  print(serialize(obj))
+local function debugPrint(options, obj)
+  if options.debug then
+    print(serialize(obj))
+  end
 end
 
-local function debugLog(obj)
-  quarto.log.output(serialize(obj))
+local function debugLog(options, obj)
+  if options.debug then
+    quarto.log.output(serialize(obj))
+  end
 end
 
 -- Helper function to copy a table
@@ -139,7 +143,6 @@ local function tikzToPdf(tikzCode, tmpdir, outputFile, scale, libraries)
 end
 
 -- Initializes and processes the options for the TikZ code block
--- Initializes and processes the options for the TikZ code block
 local function processOptions(cb, globalOptions)
   local options = copyTable(globalOptions)
 
@@ -172,8 +175,11 @@ local function processOptions(cb, globalOptions)
     options.folder = "./images"
   end
 
-  -- Set cache path from document options
+  -- Set cache path
   options.cache = options.cache or nil
+
+  -- Set debug option
+  options.debug = options.debug or false
 
   return options
 end
