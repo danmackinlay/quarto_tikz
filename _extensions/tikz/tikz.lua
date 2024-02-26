@@ -289,7 +289,8 @@ function Pandoc(doc)
     caption = '',
     width = nil,
     height = nil,
-    embed_mode = EmbedMode.inline
+    embed_mode = EmbedMode.inline,
+    cache = nil
   }
 
   -- Process global attributes
