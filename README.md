@@ -30,7 +30,17 @@ This should appear in the output as an image
 
 ![](./images/example-1.svg)
 
-Note that _if ghostscript is not installed on your system it will fail to render SVGs_.
+## Ghostscript
+
+Note that _if ghostscript librarires are not discoverable on your system [we will fail to render SVGs](https://dvisvgm.de/FAQ/)_.
+Getting ghostscript installed appropriates fiddly on MacOS;
+On recnet macs [it should be sufficient to install MacTex 2023](https://tex.stackexchange.com/a/663229) with the _install ghostscript dynamic library_ option checked.
+Before macTeX 2023 there are workarounds involving setting the ghostscript library path.
+For example if I have Apple Silicon and homebrew ghostscript installed, I can set the following environment variables:
+
+```bash
+export LIBGS=/opt/homebrew/lib/libgs.dylib
+```
 
 ## Example
 
@@ -40,6 +50,13 @@ Here is the source code for a minimal example: [example.qmd](example.qmd).
 
 This does produce PDFs which can be included in PDF output; I wonder if we could shortcut the PDF rendering and just render as plain LaTeX in that case?
 I’m not suite sure how to handle the TikZ libraries in that case.
+Pull requests welcome.
+
+## Efficiency
+
+This filter is not particularly efficient, as it has no execution caching;
+A better implementation would include a whole tikz language engine.
+That feels like a lot more work than I can justify for the current project.
 Pull requests welcome.
 
 ## Credits
