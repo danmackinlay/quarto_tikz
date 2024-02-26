@@ -30,11 +30,15 @@ This should appear in the output as an image
 
 ![](./images/example-1.svg)
 
-## Ghostscript
+## Example
 
-Note that _if ghostscript librarires are not discoverable on your system [we will fail to render SVGs](https://dvisvgm.de/FAQ/)_.
-Getting ghostscript installed appropriates fiddly on MacOS;
-On recnet macs [it should be sufficient to install MacTex 2023](https://tex.stackexchange.com/a/663229) with the _install ghostscript dynamic library_ option checked.
+Here is the source code for a minimal example: [example.qmd](example.qmd).
+
+## Render failures
+
+Note that _if ghostscript libraries are not discoverable on your system [we will fail to render SVGs correctly](https://dvisvgm.de/FAQ/)_.
+Getting ghostscript installed appropriately can be fiddly on MacOS;
+On recent macs [it should be sufficient to install MacTex 2023](https://tex.stackexchange.com/a/663229) with the _install ghostscript dynamic library_ option checked.
 Before macTeX 2023 there are workarounds involving setting the ghostscript library path.
 For example if I have Apple Silicon and homebrew ghostscript installed, I can set the following environment variables:
 
@@ -42,14 +46,11 @@ For example if I have Apple Silicon and homebrew ghostscript installed, I can se
 export LIBGS=/opt/homebrew/lib/libgs.dylib
 ```
 
-## Example
-
-Here is the source code for a minimal example: [example.qmd](example.qmd).
-
 ## PDF output
 
-This does produce PDFs which can be included in PDF output; I wonder if we could shortcut the PDF rendering and just render as plain LaTeX in that case?
+This does produce PDFs which can be included in PDF output; I wonder if we could shortcut the PDF rendering and just output as plain LaTeX in that case to integrate into the main LaTeX rendering workflow?
 I’m not suite sure how to handle the TikZ libraries in that case.
+
 Pull requests welcome.
 
 ## Efficiency
@@ -57,7 +58,10 @@ Pull requests welcome.
 This filter is not particularly efficient, as it has no execution caching;
 A better implementation would include a whole tikz language engine.
 That feels like a lot more work than I can justify for the current project.
-Pull requests welcome.
+
+Not that `dvisvgm` supports a cache via the `--cache` option, and that latex can be fairly good at caching if we allow the intermediate files to persist; maybe we could even exploit quarto infrastructure to do so?
+
+Pull requests for that issue also welcome.
 
 ## Credits
 
