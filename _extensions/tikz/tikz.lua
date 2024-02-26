@@ -257,5 +257,7 @@ function Pandoc(doc)
     end
   end
 
-  return doc:walk(tikz_walker(options))
+  local tikzFilter = tikz_walker(options)
+  local filteredBlocks = pandoc.walk_block(pandoc.Div(doc.blocks), tikzFilter).content
+  return pandoc.Pandoc(filteredBlocks, doc.meta)
 end
