@@ -66,3 +66,5 @@ Pull requests for that issue also welcome.
 ## Credits
 
 Created by cribbing the tricks from [knitr/inst/examples/knitr-graphics.Rnw ](https://github.com/yihui/knitr/blob/master/R/engine.R#L348) and [quarto-d2/\_extensions/d2/d2.lua](https://github.com/data-intuitive/quarto-d2/blob/main/_extensions/d2/d2.lua).
+
+After spending 2 days of my getting this working, I found that [there is a worked example of a tikz filterin pandoc](https://pandoc.org/lua-filters.html#building-images-with-tikz).
