@@ -5,13 +5,13 @@ filters:
 format: html
 tikz:
   cache: _tikz_cache
-  debug: false
+  debug: true
 ---
 
 This renders TiKZ diagrams in markdown.
 
 
-```{.tikz embed_mode="link" scale=3 filename="example" format="svg" caption="Rendering TikZ DAGs is easy"}
+```{.tikz embed_mode="inline" scale=3 filename="example" format="svg" caption="Rendering TikZ DAGs is easy"}
 \node[draw, circle] (A) at (0,0) {A};
 \node[draw, circle] (B) at (2,2) {$\phi$};
 \node[draw, circle] (C) at (4,0) {C};
