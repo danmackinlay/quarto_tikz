@@ -11,6 +11,16 @@ local EmbedMode = {
   raw = "raw"
 }
 
+-- Helper function for file existence
+local function file_exists(name)
+  local f = io.open(name, 'r')
+  if f ~= nil then
+    io.close(f)
+    return true
+  else
+    return false
+  end
+end
 -- Helper function for debugging
 local function serialize(obj, indentLevel)
   indentLevel = indentLevel or 0
@@ -176,6 +186,22 @@ local function renderTikz(cb, options, tmpdir)
     outputPath = tempOutputPath
   end
 
+  -- Check if the result is already cached
+  local cachePath
+  if options.cache ~= nil then
+    cachePath = pandoc.path.join({ options.cache, pandoc.sha1(cb.text) .. "." .. options.format })
+    if file_exists(cachePath) then
+      if options.embed_mode == EmbedMode.link then
+        return cachePath
+      else
+        local file = io.open(cachePath, "rb")
+        local data = file and file:read('*all')
+        if file then file:close() end
+        return data
+      end
+    end
+  end
+
   if quarto.doc.isFormat("html") then
     tikzToSvg(cb.text, tmpdir, options.filename, options.scale, options.libraries)
   elseif quarto.doc.isFormat("pdf") then
@@ -190,12 +216,25 @@ local function renderTikz(cb, options, tmpdir)
   end
 
   if options.embed_mode == EmbedMode.link then
+    -- Save the result to the cache
+    if options.cache ~= nil then
+      os.execute("mkdir -p " .. pandoc.path.directory(cachePath))
+      os.execute("cp " .. outputPath .. " " .. cachePath)
+    end
     return outputPath
   else
     local file = io.open(outputPath, "rb")
     local data = file and file:read('*all')
     if file then file:close() end
     os.remove(outputPath)
+
+    -- Save the result to the cache
+    if options.cache ~= nil then
+      os.execute("mkdir -p " .. pandoc.path.directory(cachePath))
+      local cacheFile = io.open(cachePath, "wb")
+      cacheFile:write(data)
+      cacheFile:close()
+    end
 
     if options.embed_mode == EmbedMode.raw then
       return data
