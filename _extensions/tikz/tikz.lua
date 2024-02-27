@@ -184,7 +184,7 @@ local function processOptions(cb, globalOptions)
   return options
 end
 
--- Renders the TikZ code block and returns the result path or data
+-- Renders the TikZ code block, returning the result path or data depending on the embed mode
 local function renderTikz(cb, options, tmpdir)
   local outputPath, tempOutputPath
   if options.folder ~= nil then
@@ -202,12 +202,18 @@ local function renderTikz(cb, options, tmpdir)
     cachePath = pandoc.path.join({ options.cache, pandoc.sha1(cb.text) .. "." .. options.format })
     if file_exists(cachePath) then
       if options.embed_mode == EmbedMode.link then
-        return cachePath
+        os.execute("cp " .. cachePath .. " " .. outputPath)
+        return outputPath
       else
         local file = io.open(cachePath, "rb")
         local data = file and file:read('*all')
         if file then file:close() end
-        return data
+        if options.embed_mode == EmbedMode.inline then
+          local mimeType = (options.format == "svg" and "image/svg+xml") or "application/pdf"
+          return "data:" .. mimeType .. ";base64," .. quarto.base64.encode(data)
+        else
+          return data
+        end
       end
     end
   end
