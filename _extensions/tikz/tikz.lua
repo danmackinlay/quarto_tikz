@@ -201,66 +201,42 @@ local function renderTikz(cb, options, tmpdir)
   if options.cache ~= nil then
     cachePath = pandoc.path.join({ options.cache, pandoc.sha1(cb.text) .. "." .. options.format })
     if file_exists(cachePath) then
-      if options.embed_mode == EmbedMode.link then
-        os.execute("cp " .. cachePath .. " " .. outputPath)
-        return outputPath
+      outputPath = cachePath
+    else
+      -- Generate the output
+      if quarto.doc.isFormat("html") then
+        tikzToSvg(cb.text, tmpdir, options.filename, options.scale, options.libraries)
+      elseif quarto.doc.isFormat("pdf") then
+        tikzToPdf(cb.text, tmpdir, options.filename, options.scale, options.libraries)
       else
-        local file = io.open(cachePath, "rb")
-        local data = file and file:read('*all')
-        if file then file:close() end
-        if options.embed_mode == EmbedMode.inline then
-          local mimeType = (options.format == "svg" and "image/svg+xml") or "application/pdf"
-          return "data:" .. mimeType .. ";base64," .. quarto.base64.encode(data)
-        else
-          return data
-        end
+        print("Error: Unsupported format")
+        return nil
+      end
+
+      if tempOutputPath ~= outputPath then
+        os.rename(tempOutputPath, outputPath)
+      end
+
+      -- Save the result to the cache
+      if options.cache ~= nil then
+        os.execute("mkdir -p " .. pandoc.path.directory(cachePath))
+        os.execute("cp " .. outputPath .. " " .. cachePath)
       end
     end
   end
 
-  if quarto.doc.isFormat("html") then
-    tikzToSvg(cb.text, tmpdir, options.filename, options.scale, options.libraries)
-  elseif quarto.doc.isFormat("pdf") then
-    tikzToPdf(cb.text, tmpdir, options.filename, options.scale, options.libraries)
-  else
-    print("Error: Unsupported format")
-    return nil
-  end
-
-  if tempOutputPath ~= outputPath then
-    os.rename(tempOutputPath, outputPath)
-  end
+  -- Read the data
+  local file = io.open(outputPath, "rb")
+  local data = file and file:read('*all')
+  if file then file:close() end
 
   if options.embed_mode == EmbedMode.link then
-    -- Save the result to the cache
-    if options.cache ~= nil then
-      os.execute("mkdir -p " .. pandoc.path.directory(cachePath))
-      os.execute("cp " .. outputPath .. " " .. cachePath)
-    end
     return outputPath
   else
-    local file = io.open(outputPath, "rb")
-    local data = file and file:read('*all')
-    if file then file:close() end
-    os.remove(outputPath)
-
-    -- Save the result to the cache
-    if options.cache ~= nil then
-      os.execute("mkdir -p " .. pandoc.path.directory(cachePath))
-      local cacheFile = io.open(cachePath, "wb")
-      cacheFile:write(data)
-      cacheFile:close()
-    end
-
-    if options.embed_mode == EmbedMode.raw then
-      return data
-    elseif options.embed_mode == EmbedMode.inline then
-      local mimeType = (options.format == "svg" and "image/svg+xml") or "application/pdf"
-      return "data:" .. mimeType .. ";base64," .. quarto.base64.encode(data)
-    else
-      debugLog("Error: Unsupported format")
-      return nil
-    end
+    -- Prepare the data for embedding
+    local mimeType = (options.format == "svg" and "image/svg+xml") or "application/pdf"
+    local encodedData = quarto.base64.encode(data)
+    return "data:" .. mimeType .. ";base64," .. encodedData
   end
 end
 
