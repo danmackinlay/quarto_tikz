@@ -285,7 +285,10 @@ local function tikz_walker()
       if localOptions.height ~= nil then
         figure.content[1].attributes.height = localOptions.height
       end
-
+      -- Preserve the ID of the original code block
+      if cb.identifier ~= nil then
+        figure.identifier = cb.identifier
+      end
       return figure
     end
   }
