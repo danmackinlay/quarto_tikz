@@ -53,7 +53,6 @@ For example if I have Apple Silicon and homebrew ghostscript installed, I can se
 export LIBGS=/opt/homebrew/lib/libgs.dylib
 ```
 
-
 ## PDF output
 
 This does produce PDFs which can be included in PDF output; I wonder if we could shortcut the PDF rendering and just output as plain LaTeX in that case to integrate into the main LaTeX rendering workflow?
@@ -77,5 +76,5 @@ Pull requests for that issue also welcome.
 
 ## Credits
 
-Created by cribbing the tricks from [knitr/inst/examples/knitr-graphics.Rnw ](https://github.com/yihui/knitr/blob/master/R/engine.R#L348) and [quarto-d2/\_extensions/d2/d2.lua](https://github.com/data-intuitive/quarto-d2/blob/main/_extensions/d2/d2.lua).
+Created by cribbing the tricks from [knitr/inst/examples/knitr-graphics.Rnw ](https://github.com/yihui/knitr/blob/master/R/engine.R#L348) and [data-intuitive/quarto-d2/](https://github.com/data-intuitive/quarto-d2/blob/main/_extensions/d2/d2.lua).
 After spending 2 days of my life getting this working, I found that [there is a worked example of a tikz filter in pandoc itself](https://pandoc.org/lua-filters.html#building-images-with-tikz).
