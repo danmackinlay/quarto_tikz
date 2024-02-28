@@ -1,3 +1,4 @@
+
 -- Enum for TikzFormat
 local TikzFormat = {
   svg = 'svg',
@@ -11,6 +12,18 @@ local EmbedMode = {
   raw = "raw"
 }
 
+-- Global options table
+local globalOptions = {
+  format = TikzFormat.svg,
+  folder = nil,
+  filename = pandoc.utils.stringify("tikz-output"),
+  caption = '',
+  width = nil,
+  height = nil,
+  embed_mode = EmbedMode.inline,
+  cache = nil,
+  debug = false
+}
 -- Helper function for file existence
 local function file_exists(name)
   local f = io.open(name, 'r')
@@ -41,15 +54,28 @@ local function serialize(obj, indentLevel)
   end
 end
 
-local function debugPrint(options, obj)
-  if options.debug then
+-- Debug functions
+local function debugTablePrint(obj)
+  if globalOptions.debug then
     print(serialize(obj))
   end
 end
 
-local function debugLog(options, obj)
-  if options.debug then
+local function debugTableLog(obj)
+  if globalOptions.debug then
     quarto.log.output(serialize(obj))
+  end
+end
+
+local function debugPrint(obj)
+  if globalOptions.debug then
+    print(obj)
+  end
+end
+
+local function debugLog(obj)
+  if globalOptions.debug then
+    quarto.log.output(obj)
   end
 end
 
@@ -101,8 +127,7 @@ local function createTexFile(tikzCode, tmpdir, outputFile, scale, libraries)
   local texCode = string.format(template, libraryNames, scale, tikzCode)
   local texFile = pandoc.path.join({ tmpdir, outputFile .. ".tex" })
   local file = io.open(texFile, "w")
-  debugPrint(texCode)
-  print(texCode)
+  debugLog(texCode)
   file:write(texCode)
   file:close()
 
@@ -143,45 +168,42 @@ local function tikzToPdf(tikzCode, tmpdir, outputFile, scale, libraries)
 end
 
 -- Initializes and processes the options for the TikZ code block
-local function processOptions(cb, globalOptions)
-  local options = copyTable(globalOptions)
+local function processOptions(cb)
+  local localOptions = copyTable(globalOptions)
 
   -- Process codeblock attributes
   for k, v in pairs(cb.attributes) do
-    options[k] = v
+    localOptions[k] = v
   end
 
   -- Transform options
-  if options.format ~= nil and type(options.format) == "string" then
-    assert(TikzFormat[options.format] ~= nil,
-      "Invalid format: " .. options.format .. ". Options are: " .. serialize(TikzFormat))
-    options.format = TikzFormat[options.format]
+  if localOptions.format ~= nil and type(localOptions.format) == "string" then
+    assert(TikzFormat[localOptions.format] ~= nil,
+      "Invalid format: " .. localOptions.format .. ". Options are: " .. serialize(TikzFormat))
+    localOptions.format = TikzFormat[localOptions.format]
   end
-  if options.embed_mode ~= nil and type(options.embed_mode) == "string" then
-    assert(EmbedMode[options.embed_mode] ~= nil,
-      "Invalid embed_mode: " .. options.embed_mode .. ". Options are: " .. serialize(EmbedMode))
-    options.embed_mode = EmbedMode[options.embed_mode]
+  if localOptions.embed_mode ~= nil and type(localOptions.embed_mode) == "string" then
+    assert(EmbedMode[localOptions.embed_mode] ~= nil,
+      "Invalid embed_mode: " .. localOptions.embed_mode .. ". Options are: " .. serialize(EmbedMode))
+    localOptions.embed_mode = EmbedMode[localOptions.embed_mode]
   end
 
   -- Set default values
-  options.filename = (options.filename or "tikz-output") .. "-" .. counter
-  if options.format == TikzFormat.svg and quarto.doc.is_format("latex") then
-    options.format = TikzFormat.pdf
+  localOptions.filename = (localOptions.filename or "tikz-output") .. "-" .. counter
+  if localOptions.format == TikzFormat.svg and quarto.doc.is_format("latex") then
+    localOptions.format = TikzFormat.pdf
   end
-  if not quarto.doc.is_format("html") or options.format == TikzFormat.pdf then
-    options.embed_mode = EmbedMode.link
+  if not quarto.doc.is_format("html") or localOptions.format == TikzFormat.pdf then
+    localOptions.embed_mode = EmbedMode.link
   end
-  if options.folder == nil and options.embed_mode == EmbedMode.link then
-    options.folder = "./images"
+  if localOptions.folder == nil and localOptions.embed_mode == EmbedMode.link then
+    localOptions.folder = "./images"
   end
 
   -- Set cache path
-  options.cache = options.cache or nil
+  localOptions.cache = localOptions.cache or nil
 
-  -- Set debug option
-  options.debug = options.debug or false
-
-  return options
+  return localOptions
 end
 
 -- Renders the TikZ code block, returning the result path or data depending on the embed mode
@@ -209,7 +231,7 @@ local function renderTikz(cb, options, tmpdir)
       elseif quarto.doc.isFormat("pdf") then
         tikzToPdf(cb.text, tmpdir, options.filename, options.scale, options.libraries)
       else
-        print("Error: Unsupported format")
+        quarto.log.output("Error: Unsupported format")
         return nil
       end
 
@@ -241,7 +263,7 @@ local function renderTikz(cb, options, tmpdir)
 end
 
 -- Main function to create the TikZ filter
-local function tikz_walker(globalOptions)
+local function tikz_walker()
   return {
     CodeBlock = function(cb)
       if not cb.classes:includes('tikz') or cb.text == nil then
@@ -249,19 +271,19 @@ local function tikz_walker(globalOptions)
       end
 
       counter = counter + 1
-      local options = processOptions(cb, globalOptions)
+      local localOptions = processOptions(cb)
 
       local result = pandoc.system.with_temporary_directory('tikz-convert', function(tmpdir)
-        return renderTikz(cb, options, tmpdir)
+        return renderTikz(cb, localOptions, tmpdir)
       end)
 
-      local caption = options.caption ~= '' and { pandoc.Str(options.caption) } or nil
+      local caption = localOptions.caption ~= '' and { pandoc.Str(localOptions.caption) } or nil
       local figure = pandoc.Figure({ pandoc.Image({}, result) }, caption)
-      if options.width ~= nil then
-        figure.content[1].attributes.width = options.width
+      if localOptions.width ~= nil then
+        figure.content[1].attributes.width = localOptions.width
       end
-      if options.height ~= nil then
-        figure.content[1].attributes.height = options.height
+      if localOptions.height ~= nil then
+        figure.content[1].attributes.height = localOptions.height
       end
 
       return figure
@@ -269,27 +291,22 @@ local function tikz_walker(globalOptions)
   }
 end
 
+-- Main function to create the TikZ filter
 function Pandoc(doc)
-  local options = {
-    format = TikzFormat.svg,
-    folder = nil,
-    filename = pandoc.utils.stringify(doc.meta.slug or "tikz-output"),
-    caption = '',
-    width = nil,
-    height = nil,
-    embed_mode = EmbedMode.inline,
-    cache = nil
-  }
-
   -- Process global attributes
-  local globalOptions = doc.meta["tikz"]
-  if type(globalOptions) == "table" then
-    for k, v in pairs(globalOptions) do
-      options[k] = pandoc.utils.stringify(v)
+  local docGlobalOptions = doc.meta["tikz"]
+  if type(docGlobalOptions) == "table" then
+    for k, v in pairs(docGlobalOptions) do
+      globalOptions[k] = pandoc.utils.stringify(v)
     end
   end
 
-  local tikzFilter = tikz_walker(options)
+  -- Set debug option
+  globalOptions.debug = (globalOptions.debug and true) or false
+
+  debugTableLog(globalOptions)
+
+  local tikzFilter = tikz_walker()
   local filteredBlocks = pandoc.walk_block(pandoc.Div(doc.blocks), tikzFilter).content
   return pandoc.Pandoc(filteredBlocks, doc.meta)
 end
