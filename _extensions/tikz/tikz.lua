@@ -21,8 +21,7 @@ local globalOptions = {
   width = nil,
   height = nil,
   embed_mode = EmbedMode.inline,
-  cache = nil,
-  debug = false
+  cache = nil
 }
 -- Helper function for file existence
 local function file_exists(name)
@@ -51,31 +50,6 @@ local function serialize(obj, indentLevel)
     return table.concat(parts)
   else
     return (type(obj) == "string" and string.format("%q", obj) or tostring(obj))
-  end
-end
-
--- Debug functions
-local function debugTablePrint(obj)
-  if globalOptions.debug then
-    print(serialize(obj))
-  end
-end
-
-local function debugTableLog(obj)
-  if globalOptions.debug then
-    quarto.log.output(serialize(obj))
-  end
-end
-
-local function debugPrint(obj)
-  if globalOptions.debug then
-    print(obj)
-  end
-end
-
-local function debugLog(obj)
-  if globalOptions.debug then
-    quarto.log.output(obj)
   end
 end
 
@@ -127,7 +101,7 @@ local function createTexFile(tikzCode, tmpdir, outputFile, scale, libraries)
   local texCode = string.format(template, libraryNames, scale, tikzCode)
   local texFile = pandoc.path.join({ tmpdir, outputFile .. ".tex" })
   local file = io.open(texFile, "w")
-  debugLog(texCode)
+  quarto.log.debug(texCode)
   file:write(texCode)
   file:close()
 
@@ -287,7 +261,7 @@ local function tikz_walker()
       if localOptions.height ~= nil then
         image.attributes.height = localOptions.height
       end
-      -- weirdly although we 
+      -- weirdly although we
       local figure = pandoc.Figure({ image }, caption, cb.classes, cb.identifier)
       return figure
     end
@@ -304,10 +278,8 @@ function Pandoc(doc)
     end
   end
 
-  -- Set debug option
-  globalOptions.debug = (globalOptions.debug and true) or false
-
-  debugTableLog(globalOptions)
+  quarto.log.debug("globalOptions")
+  quarto.log.debug(globalOptions)
 
   local tikzFilter = tikz_walker()
   local filteredBlocks = pandoc.walk_block(pandoc.Div(doc.blocks), tikzFilter).content

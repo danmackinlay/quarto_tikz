@@ -36,7 +36,9 @@ Here is the source code for a minimal example: [example.qmd](example.qmd).
 
 ## Known bugs
 
-- all classes and ids are striped from the output figure, despite my best efforts to explicitly attach them to the generated Figure
+- all classes and ids are striped from the output figure, despite my best efforts to explicitly attach them to the generated Figure.
+  Thus you cannot refer to the figure in the text.
+- maybe related: although the output is rendered as an HTML `<figure>` and can have a caption, it is invisible to Quarto’s crossref system
 - The output is still wrapped in a CodeBlock-type div
 
 ## Render failures
