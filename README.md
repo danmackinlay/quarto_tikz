@@ -34,6 +34,11 @@ This should appear in the output as an image
 
 Here is the source code for a minimal example: [example.qmd](example.qmd).
 
+## Known bugs
+
+- all classes and ids are striped from the output figure, despite my best efforts to explicitly attach them to the generated Figure
+- The output is still wrapped in a CodeBlock-type div
+
 ## Render failures
 
 Note that _if ghostscript libraries are not discoverable on your system [we will fail to render SVGs correctly](https://dvisvgm.de/FAQ/)_.
@@ -45,6 +50,7 @@ For example if I have Apple Silicon and homebrew ghostscript installed, I can se
 ```bash
 export LIBGS=/opt/homebrew/lib/libgs.dylib
 ```
+
 
 ## PDF output
 

@@ -280,17 +280,15 @@ local function tikz_walker()
       end)
 
       local caption = localOptions.caption ~= '' and { pandoc.Str(localOptions.caption) } or nil
-      local figure = pandoc.Figure({ pandoc.Image({}, result) }, caption)
+      local image = pandoc.Image({}, result)
       if localOptions.width ~= nil then
-        figure.content[1].attributes.width = localOptions.width
+        image.attributes.width = localOptions.width
       end
       if localOptions.height ~= nil then
-        figure.content[1].attributes.height = localOptions.height
+        image.attributes.height = localOptions.height
       end
-      -- Preserve the ID of the original code block
-      if cb.identifier ~= nil then
-        figure.identifier = cb.identifier
-      end
+      -- weirdly although we 
+      local figure = pandoc.Figure({ image }, caption, cb.classes, cb.identifier)
       return figure
     end
   }
