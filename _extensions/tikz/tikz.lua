@@ -207,6 +207,7 @@ local function processOptions(cb)
 end
 
 -- Renders the TikZ code block, returning the result path or data depending on the embed mode
+-- Renders the TikZ code block, returning the result path or data depending on the embed mode
 local function renderTikz(cb, options, tmpdir)
   local outputPath, tempOutputPath
   if options.folder ~= nil then
@@ -223,7 +224,8 @@ local function renderTikz(cb, options, tmpdir)
   if options.cache ~= nil then
     cachePath = pandoc.path.join({ options.cache, pandoc.sha1(cb.text) .. "." .. options.format })
     if file_exists(cachePath) then
-      outputPath = cachePath
+      -- If the file exists in the cache, copy it to the output path
+      os.execute("cp " .. cachePath .. " " .. outputPath)
     else
       -- Generate the output
       if quarto.doc.isFormat("html") then
