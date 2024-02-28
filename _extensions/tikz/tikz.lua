@@ -33,25 +33,6 @@ local function file_exists(name)
     return false
   end
 end
--- Helper function for debugging
-local function serialize(obj, indentLevel)
-  indentLevel = indentLevel or 0
-  local indent = string.rep("  ", indentLevel)
-  local indentNext = string.rep("  ", indentLevel + 1)
-
-  if type(obj) == "table" then
-    local parts = {}
-    table.insert(parts, "{\n")
-    for k, v in pairs(obj) do
-      local keyStr = (type(k) == "string" and string.format("%q", k) or tostring(k))
-      table.insert(parts, indentNext .. "[" .. keyStr .. "] = " .. serialize(v, indentLevel + 1) .. ",\n")
-    end
-    table.insert(parts, indent .. "}")
-    return table.concat(parts)
-  else
-    return (type(obj) == "string" and string.format("%q", obj) or tostring(obj))
-  end
-end
 
 -- Helper function to copy a table
 function copyTable(obj, seen)
@@ -152,16 +133,21 @@ local function processOptions(cb)
 
   -- Transform options
   if localOptions.format ~= nil and type(localOptions.format) == "string" then
-    assert(TikzFormat[localOptions.format] ~= nil,
-      "Invalid format: " .. localOptions.format .. ". Options are: " .. serialize(TikzFormat))
+    if TikzFormat[localOptions.format] == nil then
+      local errorMsg = "Invalid format: " .. localOptions.format
+      quarto.log.output(errorMsg)
+      assert(false, errorMsg)
+    end
     localOptions.format = TikzFormat[localOptions.format]
   end
   if localOptions.embed_mode ~= nil and type(localOptions.embed_mode) == "string" then
-    assert(EmbedMode[localOptions.embed_mode] ~= nil,
-      "Invalid embed_mode: " .. localOptions.embed_mode .. ". Options are: " .. serialize(EmbedMode))
+    if EmbedMode[localOptions.embed_mode] == nil then
+      local errorMsg = "Invalid embed_mode: " .. localOptions.embed_mode
+      quarto.log.output(errorMsg)
+      assert(false, errorMsg)
+    end
     localOptions.embed_mode = EmbedMode[localOptions.embed_mode]
   end
-
   -- Set default values
   localOptions.filename = (localOptions.filename or "tikz-output") .. "-" .. counter
   if localOptions.format == TikzFormat.svg and quarto.doc.is_format("latex") then
