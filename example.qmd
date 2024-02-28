@@ -2,7 +2,9 @@
 title: "Tikz Example"
 filters:
   - tikz
-format: html
+format:
+  html: {}
+  native: {}
 tikz:
   cache: _tikz_cache
 ---

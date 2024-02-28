@@ -247,7 +247,7 @@ local function tikz_walker()
       if localOptions.height ~= nil then
         image.attributes.height = localOptions.height
       end
-      -- weirdly although we
+      -- weirdly although we set the classes and identifier explictly they do not appear in the output.
       local figure = pandoc.Figure({ image }, caption, cb.classes, cb.identifier)
       return figure
     end
