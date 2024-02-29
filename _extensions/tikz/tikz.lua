@@ -224,31 +224,37 @@ end
 
 -- Main function to create the TikZ filter
 local function tikz_walker()
-  return {
-    CodeBlock = function(cb)
-      if not cb.classes:includes('tikz') or cb.text == nil then
-        return nil
-      end
-
-      counter = counter + 1
-      local localOptions = processOptions(cb)
-
-      local result = pandoc.system.with_temporary_directory('tikz-convert', function(tmpdir)
-        return renderTikz(cb, localOptions, tmpdir)
-      end)
-
-      local image = pandoc.Image({
-          classes = cb.classes, identifier = cb.identifier
-        }, result)
-      if localOptions.width ~= nil then
-        image.attributes.width = localOptions.width
-      end
-      if localOptions.height ~= nil then
-        image.attributes.height = localOptions.height
-      end
-      -- weirdly although we set the classes and identifier explictly they do not appear in the output.
-      return image
+  local CodeBlock = function(cb)
+    if not cb.classes:includes('tikz') or cb.text == nil then
+      return nil
     end
+
+    counter = counter + 1
+    local localOptions = processOptions(cb)
+
+    local result = pandoc.system.with_temporary_directory('tikz-convert', function(tmpdir)
+      return renderTikz(cb, localOptions, tmpdir)
+    end)
+
+    local image = pandoc.Image({
+        classes = cb.classes, identifier = cb.identifier
+      }, result)
+    if localOptions.width ~= nil then
+      image.attributes.width = localOptions.width
+    end
+    if localOptions.height ~= nil then
+      image.attributes.height = localOptions.height
+    end
+    -- weirdly although we set the classes and identifier explictly they do not appear in the output.
+    return image
+  end
+  -- see https://github.com/quarto-dev/quarto-cli/discussions/8926#discussioncomment-8624950
+  local DecoratedCodeBlock = function(node)
+    return CodeBlock(node.code_block)
+  end
+  return {
+    CodeBlock = CodeBlock,
+    DecoratedCodeBlock = DecoratedCodeBlock
   }
 end
 
