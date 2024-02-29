@@ -62,9 +62,8 @@ Pull requests welcome.
 
 ## Efficiency
 
-~~This filter is not particularly efficient, as it has no execution caching;~~
 This filter has optional execution caching.
-If you use that make sure you clean it up occasionally, as it will fill up your disk with diagrams.
+If you use that, make sure you clean it up occasionally, as it will fill up your disk with diagrams.
 
 A better implementation would use a language cache like other engines in quarto.
 However, developing a a whole tikz language engine feels like a lot more work than I can justify for the current project.
@@ -81,4 +80,4 @@ After spending 2 days of my life getting this working, I found that [there is a 
 There is a bigger and more powerful system [pandoc-ext/diagram](https://github.com/pandoc-ext/diagram/tree/main) which you might prefer to use instead.
 It can “Generate diagrams from embedded code; supports Mermaid, Dot/GraphViz, PlantUML, Asymptote, and TikZ”.
 
-The distinction between this and their project is that for this filter inkscape is not a dependency, and we can use the `dvisvgm` backend.
+The distinction between this and their project is that for this filter inkscape is not a dependency, and we can use the `dvisvgm` backend, but OTOH, their package is better tested, more capable and more general.
