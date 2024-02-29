@@ -4,7 +4,6 @@ filters:
   - tikz
 format:
   html: {}
-  native: {}
 tikz:
   cache: _tikz_cache
 ---

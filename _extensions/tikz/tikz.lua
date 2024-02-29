@@ -245,7 +245,8 @@ local function tikz_walker()
     if localOptions.height ~= nil then
       image.attributes.height = localOptions.height
     end
-    -- weirdly although we set the classes and identifier explictly they do not appear in the output.
+    -- although we set the classes and identifier explictly they do not appear in the output.
+    -- see https://github.com/quarto-dev/quarto-cli/discussions/8926#discussioncomment-8625015
     return image
   end
   -- see https://github.com/quarto-dev/quarto-cli/discussions/8926#discussioncomment-8624950

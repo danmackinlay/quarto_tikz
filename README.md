@@ -81,3 +81,4 @@ There is a bigger and more powerful system [pandoc-ext/diagram](https://github.c
 It can “Generate diagrams from embedded code; supports Mermaid, Dot/GraphViz, PlantUML, Asymptote, and TikZ”.
 
 The distinction between this and their project is that for this filter inkscape is not a dependency, and we can use the `dvisvgm` backend, but OTOH, their package is better tested, more capable and more general.
+However, it is [currently broken for Quarto 1.4+](https://github.com/pandoc-ext/diagram/issues/13).
