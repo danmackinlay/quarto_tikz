@@ -121,12 +121,31 @@ local function tikzToPdf(tikzCode, tmpdir, outputFile, scale, libraries)
   return pdfFile
 end
 
+-- Function to get properties from the TikZ code
+local function properties_from_code(code, comment_start)
+  local props = {}
+  local pattern = comment_start:gsub('%p', '%%%1') .. '| ' ..
+      '([-_%w]+): ([^\n]*)\n'
+  for key, value in code:gmatch(pattern) do
+    if key ~= 'caption' then
+      props[key] = value
+    end
+  end
+  return props
+end
+
 -- Initializes and processes the options for the TikZ code block
 local function processOptions(cb)
   local localOptions = copyTable(globalOptions)
 
   -- Process codeblock attributes
   for k, v in pairs(cb.attributes) do
+    localOptions[k] = v
+  end
+
+  -- Process options from TikZ code comments
+  local commentOptions = properties_from_code(cb.text, "%%")
+  for k, v in pairs(commentOptions) do
     localOptions[k] = v
   end
 

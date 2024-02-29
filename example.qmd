@@ -11,7 +11,8 @@ tikz:
 This renders TiKZ diagrams in markdown.
 
 ::: {#fig-example .test-class}
-```{.tikz  embed_mode="link" scale=3 filename="example" format="svg" }
+```{.tikz  embed_mode="link" scale=3 filename="example"}
+%%|format: svg
 \node[draw, circle] (A) at (0,0) {A};
 \node[draw, circle] (B) at (2,2) {$\phi$};
 \node[draw, circle] (C) at (4,0) {C};
