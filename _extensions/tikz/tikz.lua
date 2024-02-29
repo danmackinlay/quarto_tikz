@@ -17,7 +17,6 @@ local globalOptions = {
   format = TikzFormat.svg,
   folder = nil,
   filename = pandoc.utils.stringify("tikz-output"),
-  caption = '',
   width = nil,
   height = nil,
   embed_mode = EmbedMode.inline,
@@ -238,8 +237,9 @@ local function tikz_walker()
         return renderTikz(cb, localOptions, tmpdir)
       end)
 
-      local caption = localOptions.caption ~= '' and { pandoc.Str(localOptions.caption) } or nil
-      local image = pandoc.Image({}, result)
+      local image = pandoc.Image({
+          classes = cb.classes, identifier = cb.identifier
+        }, result)
       if localOptions.width ~= nil then
         image.attributes.width = localOptions.width
       end
@@ -247,8 +247,7 @@ local function tikz_walker()
         image.attributes.height = localOptions.height
       end
       -- weirdly although we set the classes and identifier explictly they do not appear in the output.
-      local figure = pandoc.Figure({ image }, caption, cb.classes, cb.identifier)
-      return figure
+      return image
     end
   }
 end
