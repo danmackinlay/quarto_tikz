@@ -81,4 +81,4 @@ After spending 2 days of my life getting this working, I found that [there is a 
 There is a bigger and more powerful system [pandoc-ext/diagram](https://github.com/pandoc-ext/diagram/tree/main) which you might prefer to use instead.
 It can “Generate diagrams from embedded code; supports Mermaid, Dot/GraphViz, PlantUML, Asymptote, and TikZ”.
 
-The distinction between this and their project is for this filter inkscape is not a dependency, and we can use the `dvisvgm` backend.
+The distinction between this and their project is that for this filter inkscape is not a dependency, and we can use the `dvisvgm` backend.

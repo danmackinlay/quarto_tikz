@@ -167,7 +167,6 @@ local function processOptions(cb)
 end
 
 -- Renders the TikZ code block, returning the result path or data depending on the embed mode
--- Renders the TikZ code block, returning the result path or data depending on the embed mode
 local function renderTikz(cb, options, tmpdir)
   local outputPath, tempOutputPath
   if options.folder ~= nil then
