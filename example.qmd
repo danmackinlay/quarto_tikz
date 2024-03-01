@@ -5,7 +5,7 @@ filters:
 format:
   html: {}
 tikz:
-  cache: _tikz_cache
+  cache: true
 ---
 
 This renders TiKZ diagrams in markdown.

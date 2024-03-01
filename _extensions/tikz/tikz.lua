@@ -1,3 +1,21 @@
+--- Returns a filter-specific directory in which cache files can be
+--- stored, or nil if no such directory is available.
+local function cachedir()
+  local cache_home = os.getenv 'XDG_CACHE_HOME'
+  if not cache_home or cache_home == '' then
+    local user_home = pandoc.system.os == 'windows'
+        and os.getenv 'USERPROFILE'
+        or os.getenv 'HOME'
+
+    if not user_home or user_home == '' then
+      return nil
+    end
+    cache_home = pandoc.path.join { user_home, '.cache' } or nil
+  end
+
+  -- Create filter cache directory
+  return pandoc.path.join { cache_home, 'pandoc-tikz-filter' }
+end
 
 -- Enum for TikzFormat
 local TikzFormat = {
@@ -178,7 +196,7 @@ local function processOptions(cb)
     localOptions.folder = "./images"
   end
 
-  -- Set cache path
+  -- use cache?
   localOptions.cache = localOptions.cache or nil
 
   return localOptions
@@ -198,8 +216,8 @@ local function renderTikz(cb, options, tmpdir)
 
   -- Check if the result is already cached
   local cachePath
-  if options.cache ~= nil then
-    cachePath = pandoc.path.join({ options.cache, pandoc.sha1(cb.text) .. "." .. options.format })
+  if options.cache then
+    cachePath = pandoc.path.join({ cachedir(), pandoc.sha1(cb.text) .. "." .. options.format })
     if file_exists(cachePath) then
       -- If the file exists in the cache, copy it to the output path
       os.execute("cp " .. cachePath .. " " .. outputPath)
@@ -220,7 +238,6 @@ local function renderTikz(cb, options, tmpdir)
 
       -- Save the result to the cache
       if options.cache ~= nil then
-        os.execute("mkdir -p " .. pandoc.path.directory(cachePath))
         os.execute("cp " .. outputPath .. " " .. cachePath)
       end
     end
