@@ -2,6 +2,7 @@
 --- stored, or nil if no such directory is available.
 local function cachedir()
   local cache_home = os.getenv 'XDG_CACHE_HOME'
+  local cachedir = nil
   if not cache_home or cache_home == '' then
     local user_home = pandoc.system.os == 'windows'
         and os.getenv 'USERPROFILE'
@@ -14,7 +15,9 @@ local function cachedir()
   end
 
   -- Create filter cache directory
-  return pandoc.path.join { cache_home, 'pandoc-tikz-filter' }
+  cachedir =  pandoc.path.join { cache_home, 'pandoc-tikz-filter' }
+  os.execute("mkdir -p " .. cachedir)
+  return cachedir
 end
 
 -- Enum for TikzFormat
