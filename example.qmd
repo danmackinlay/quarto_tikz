@@ -11,8 +11,10 @@ tikz:
 This renders TiKZ diagrams in markdown.
 
 ::: {#fig-example .test-class}
-```{.tikz  embed_mode="link" scale=3 filename="example"}
+```{.tikz  embed_mode="link" filename="example"}
 %%|format: svg
+%%|additional_packages: \usepackage{adjustbox}
+\begin{tikzpicture}[scale=2 transform shape]
 \node[draw, circle] (A) at (0,0) {A};
 \node[draw, circle] (B) at (2,2) {$\phi$};
 \node[draw, circle] (C) at (4,0) {C};
@@ -20,6 +22,7 @@ This renders TiKZ diagrams in markdown.
 \draw[->] (A) -- (B);
 \draw[->] (B) -- (C);
 \draw[->] (C) -- (A);
+\end{tikzpicture}
 ```
 
 Rendering TikZ DAGs is easy.

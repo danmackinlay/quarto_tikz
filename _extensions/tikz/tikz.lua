@@ -69,8 +69,7 @@ end
 -- Counter for the diagram files
 local counter = 0
 
-local function createTexFile(tikzCode, tmpdir, outputFile, scale, libraries)
-  scale = scale or 1          -- Default scale is 1 if not provided
+local function createTexFile(tikz_code, tmpdir, outputFile, meta)
   local defaultLibraries = { "arrows", "fit", "shapes" }
   libraries = libraries or "" -- Default libraries is an empty string if not provided
 
@@ -84,29 +83,40 @@ local function createTexFile(tikzCode, tmpdir, outputFile, scale, libraries)
   for _, lib in ipairs(providedLibraries) do
     table.insert(defaultLibraries, lib)
   end
-
-  local template = [[
-\documentclass[tikz]{standalone}
+  local tikz_file = pandoc.path.join({ tmpdir, outputFile .. ".tex" })
+  local meta = {
+    ['header-includes'] = user_opts['header-includes'],
+    ['additional-packages'] = { pandoc.RawInline(
+      'latex',
+      stringify(user_opts['additional-packages'] or '')
+    ) },
+  }
+  --- LaTeX template used to compile TikZ images. Takes additional
+  --- packages as the first, and the actual TikZ code as the second
+  --- argument.
+  local tikz_template = pandoc.template.compile [[
+\documentclass{standalone}
+\usepackage{tikz}
 \usepackage{amsmath}
-\usetikzlibrary{%s}
+$for(header-includes)$
+$it$
+$endfor$
+$additional-packages$
 \begin{document}
-\begin{tikzpicture}[scale=%s, transform shape]
-%s
-\end{tikzpicture}
+$body$
 \end{document}
   ]]
+  local tex_code = pandoc.write(
+    pandoc.Pandoc({ pandoc.RawBlock('latex', tikz_code) }, meta),
+    'latex',
+    { template = tikz_template }
+  )
+  local fh = io.open(tikz_file, "w")
+  quarto.log.debug(tex_code)
+  fh:write(tex_code)
+  fh:close()
 
-  -- Create a comma-separated string of library names
-  local libraryNames = table.concat(defaultLibraries, ",")
-
-  local texCode = string.format(template, libraryNames, scale, tikzCode)
-  local texFile = pandoc.path.join({ tmpdir, outputFile .. ".tex" })
-  local file = io.open(texFile, "w")
-  quarto.log.debug(texCode)
-  file:write(texCode)
-  file:close()
-
-  return texFile
+  return tikz_file
 end
 
 local function tikzToSvg(tikzCode, tmpdir, outputFile, scale, libraries)
