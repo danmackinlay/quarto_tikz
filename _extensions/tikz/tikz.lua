@@ -1,10 +1,38 @@
---- Returns a filter-specific directory in which cache files can be
---- stored, or nil if no such directory is available.
+--[[
+tikz.lua - A Lua filter to process TikZ code blocks and generate figures.
+
+Based on the style of 'quarto_diagram/diagram.lua', adapted for TikZ diagrams.
+]]
+
+PANDOC_VERSION:must_be_at_least '3.0'
+
+local pandoc                   = require 'pandoc'
+local system                   = require 'pandoc.system'
+local utils                    = require 'pandoc.utils'
+
+local stringify                = utils.stringify
+local with_temporary_directory = system.with_temporary_directory
+local with_working_directory   = system.with_working_directory
+
+-- Functions to read and write files
+local function read_file(filepath)
+  local fh = io.open(filepath, 'rb')
+  local contents = fh:read('a')
+  fh:close()
+  return contents
+end
+
+local function write_file(filepath, content)
+  local fh = io.open(filepath, 'wb')
+  fh:write(content)
+  fh:close()
+end
+
+-- Returns a filter-specific directory in which cache files can be stored, or nil if not available.
 local function cachedir()
   local cache_home = os.getenv 'XDG_CACHE_HOME'
-  local cachedir = nil
   if not cache_home or cache_home == '' then
-    local user_home = pandoc.system.os == 'windows'
+    local user_home = system.os == 'windows'
         and os.getenv 'USERPROFILE'
         or os.getenv 'HOME'
 
@@ -20,35 +48,37 @@ end
 
 local image_cache = nil -- Path holding the image cache, or `nil` if the cache is not used.
 
--- Function to configure the filter based on metadata and format
-local function configure(meta, format_name)
-  local conf = meta.tikz or {}
-  local format = format_name
-  meta.tikz = nil -- Remove tikz metadata to avoid processing it further
-
-  -- cache for image files
-  if type(conf.cache) == 'boolean' and conf.cache then
-    image_cache = conf['cache-dir']
-        and stringify(conf['cache-dir'])
-        or cachedir()
-    pandoc.system.make_directory(image_cache, true)
-  else
-    image_cache = nil
+-- Function to parse properties from code comments
+local function properties_from_code(code, comment_start)
+  local props = {}
+  local pattern = comment_start:gsub('%p', '%%%1') .. '| ?' ..
+      '([-_%w]+): ([^\n]*)\n'
+  for key, value in code:gmatch(pattern) do
+    if key == 'fig-attr' then
+      -- Handle nested attributes for fig-attr
+      local attr_value = ''
+      local subpattern = comment_start:gsub('%p', '%%%1') .. '|   ([^\n]+)\n'
+      for subvalue in code:gmatch(subpattern) do
+        attr_value = attr_value .. subvalue .. '\n'
+      end
+      props[key] = pandoc.read(attr_value, 'yaml').meta
+    else
+      props[key] = value
+    end
   end
-
-  return {
-    cache = image_cache and true,
-    image_cache = image_cache,
-  }
+  return props
 end
 
 -- Function to process code block attributes and options
 local function diagram_options(cb)
-  local attribs = cb.attributes or {}
+  local attribs = properties_from_code(cb.text, '%%')
+  for key, value in pairs(cb.attributes) do
+    attribs[key] = value
+  end
 
   local alt
   local caption
-  local fig_attr = { id = cb.identifier }
+  local fig_attr = attribs['fig-attr'] or { id = cb.identifier }
   local filename
   local image_attr = {}
   local user_opt = {}
@@ -65,6 +95,8 @@ local function diagram_options(cb)
       fig_attr.id = value
     elseif attr_name == 'name' then
       fig_attr.name = value
+    elseif attr_name == 'fig-attr' then
+      -- Already handled
     else
       -- Check for prefixed attributes
       local prefix, key = attr_name:match '^(%a+)%-(%a[-%w]*)$'
@@ -72,6 +104,8 @@ local function diagram_options(cb)
         fig_attr[key] = value
       elseif prefix == 'image' or prefix == 'img' then
         image_attr[key] = value
+      elseif prefix == 'opt' then
+        user_opt[key] = value
       else
         -- Use as image attribute
         image_attr[attr_name] = value
@@ -233,6 +267,28 @@ local function code_to_figure(conf)
         ) or
         pandoc.Plain { image }
   end
+end
+
+-- Function to configure the filter based on metadata and format
+local function configure(meta, format_name)
+  local conf = meta.tikz or {}
+  local format = format_name
+  meta.tikz = nil -- Remove tikz metadata to avoid processing it further
+
+  -- cache for image files
+  if conf.cache == true then
+    image_cache = conf['cache-dir']
+        and stringify(conf['cache-dir'])
+        or cachedir()
+    pandoc.system.make_directory(image_cache, true)
+  else
+    image_cache = nil
+  end
+
+  return {
+    cache = image_cache and true,
+    image_cache = image_cache,
+  }
 end
 
 return {
