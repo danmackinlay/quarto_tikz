@@ -1,5 +1,5 @@
 ---
-title: "Tikz Example"
+title: "TikZ Example"
 filters:
   - tikz
 format:
@@ -8,19 +8,54 @@ tikz:
   cache: true
 ---
 
-This renders TiKZ diagrams in markdown.
+# Simple TikZ Diagram
+
+Here is a simple TikZ diagram without additional packages or complex features:
+
+```{.tikz}
+%%| filename: simple-diagram
+%%| caption: "A simple TikZ diagram"
+
+\begin{tikzpicture}
+  \draw (0,0) -- (1,1);
+  \draw (0,1) -- (1,0);
+  \draw (0,0) rectangle (1,1);
+\end{tikzpicture}
+```
+
+## All the features
+
+
+Now, let's look at a more complex example that uses additional packages and demonstrates more features.
+
 
 ::: {#fig-example .test-class}
 ```{.tikz}
-%%| caption: "My Diagram"
-%%| filename: "my-diagram"
+%%| filename: my-fancy-diagram
 %%| fig-attr:
-%%|   id: fig-my-diagram
+%%|   id: fig-my-fancy-diagram
 %%|   class: my-class
-% TikZ code here
-\node[draw, circle] (A) at (0,0) {A};
-\node[draw, circle] (B) at (2,2) {B};
-\draw[->] (A) -- (B);
-:::
+%%| additionalPackages: \usepackage{adjustbox}
 
-See, that was not so bad.
+\usetikzlibrary{arrows}
+\tikzstyle{int}=[draw, fill=blue!20, minimum size=2em]
+\tikzstyle{init} = [pin edge={to-,thin,black}]
+
+\resizebox{16cm}{!}{%
+  \trimbox{3.5cm 0cm 0cm 0cm}{
+    \begin{tikzpicture}[node distance=2.5cm,auto,>=latex']
+      \node [int, pin={[init]above:$v_0$}] (a) {$\frac{1}{s}$};
+      \node (b) [left of=a,node distance=2cm, coordinate] {a};
+      \node [int, pin={[init]above:$p_0$}] at (0,0) (c)
+        [right of=a] {$\frac{1}{s}$};
+      \node [coordinate] (end) [right of=c, node distance=2cm]{};
+      \path[->] (b) edge node {$a$} (a);
+      \path[->] (a) edge node {$v$} (c);
+      \draw[->] (c) edge node {$p$} (end) ;
+    \end{tikzpicture}
+  }
+}
+```
+
+A fancy TikZ example
+:::

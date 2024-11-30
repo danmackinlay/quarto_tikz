@@ -63,6 +63,9 @@ local function properties_from_code(code, comment_start)
       end
       props[key] = pandoc.read(attr_value, 'yaml').meta
     else
+    --   -- Remove surrounding quotes from value if present
+    --   value = value:gsub('^"(.*)"$', '%1')
+    --   value = value:gsub("^'(.*)'$", '%1')
       props[key] = value
     end
   end
@@ -91,6 +94,10 @@ local function diagram_options(cb)
       caption = pandoc.read(value).blocks
     elseif attr_name == 'filename' then
       filename = value
+    elseif attr_name == 'additionalPackages' then
+      user_opt['additional-packages'] = value
+    elseif attr_name == 'header-includes' then
+      user_opt['header-includes'] = value
     elseif attr_name == 'label' then
       fig_attr.id = value
     elseif attr_name == 'name' then
@@ -161,16 +168,19 @@ local function compile_tikz_to_svg(code, user_opts)
       local tikz_template = pandoc.template.compile [[
 \documentclass{standalone}
 \usepackage{tikz}
+$additional-packages$
 $for(header-includes)$
 $it$
 $endfor$
-$additional-packages$
 \begin{document}
 $body$
 \end{document}
 ]]
       local meta = {
-        ['header-includes'] = user_opts['header-includes'],
+        ['header-includes'] = { pandoc.RawInline(
+          'latex',
+          stringify(user_opts['header-includes'] or '')
+        ) },
         ['additional-packages'] = { pandoc.RawInline(
           'latex',
           stringify(user_opts['additional-packages'] or '')
