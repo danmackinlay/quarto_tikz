@@ -15,20 +15,25 @@ If you're using version control, you will want to check in this directory.
 
 Create a code block with class `.tikz`.
 
-````qmd
-```{.tikz embed_mode="link" scale=3 filename="example" format="svg"}
-\node[draw, circle] (A) at (0,0) {A};
-\node[draw, circle] (B) at (2,2) {B};
-\node[draw, circle] (C) at (4,0) {C};
-\node[draw, circle] (seven) at (5,1) {888888};
-\draw[->] (A) -- (B);
-\draw[->] (B) -- (C);
-\draw[->] (C) -- (A);
+# Simple TikZ Diagram
+
+Here is a simple TikZ diagram without additional packages or complex features:
+
+```{.tikz}
+%%| filename: simple-diagram
+
+\begin{tikzpicture}
+  \draw (0,0) -- (1,1);
+  \draw (0,0) -- (1,1);
+  \draw (0,1) -- (1,2);
+  \draw (0,1) -- (1,3);
+  \draw (1.5,2.5) rectangle (0.25,0.25);
+\end{tikzpicture}
 ```
-````
+
 This should appear in the output as an image
 
-![](./images/example-1.svg)
+![](/images/simple-diagram.svg)
 
 ## Example
 
@@ -36,10 +41,9 @@ Here is the source code for a minimal example: [example.qmd](example.qmd).
 
 ## Known bugs
 
-- all classes and ids are striped from the output figure, despite my best efforts to explicitly attach them to the generated Figure.
+- all classes and ids are striped from the output figure if you specify them from inside the tikz block, despite my best efforts to explicitly attach them to the generated Figure.
   Thus you cannot refer to the figure in the text.
-- maybe related: although the output is rendered as an HTML `<figure>` and can have a caption, it is invisible to Quarto’s crossref system
-- The output is still wrapped in a CodeBlock-type div
+- But if you use quarto’s fenced divs and give it a name like `#fig-my-diagram` things work fine.
 
 ## Render failures
 
@@ -80,5 +84,5 @@ After spending 2 days of my life getting this working, I found that [there is a 
 There is a bigger and more powerful system [pandoc-ext/diagram](https://github.com/pandoc-ext/diagram/tree/main) which you might prefer to use instead.
 It can “Generate diagrams from embedded code; supports Mermaid, Dot/GraphViz, PlantUML, Asymptote, and TikZ”.
 
-The distinction between this and their project is that for this filter inkscape is not a dependency, and we can use the `dvisvgm` backend, but OTOH, their package is better tested, more capable and more general.
-However, it is [currently broken for Quarto 1.4+](https://github.com/pandoc-ext/diagram/issues/13).
+~~The distinction between this and their project is that for this filter inkscape is not a dependency, and we can use the `dvisvgm` backend, but OTOH, their package is better tested, more capable and more general.~~
+This distinction between this project and theirs is that we handle Figures IMO sanely and also are simpler.
