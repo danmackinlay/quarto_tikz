@@ -237,6 +237,7 @@ $body$
         '--pages=1',
         '--export-type=svg',
         '--export-plain-svg',
+        '--export-margin=0',
         '--export-filename=' .. svg_file,
         pdf_file
       }

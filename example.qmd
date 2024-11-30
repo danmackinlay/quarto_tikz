@@ -16,7 +16,7 @@ Here is a simple TikZ diagram without additional packages or complex features:
 %%| filename: stick-figure
 %%| caption: A Stick Figure
 
-\begin{tikzpicture}
+\begin{tikzpicture}[scale=2, transform shape]
   % Head
   \draw (0,0) circle (1cm);
   % Body
