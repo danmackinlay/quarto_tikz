@@ -19,25 +19,35 @@ Create a code block with class `.tikz`.
 
 Here is a simple TikZ diagram without additional packages or complex features:
 
+````markdown
 ```{.tikz}
-%%| filename: simple-diagram
+%%| filename: stick-figure
+%%| caption: A Stick Figure
 
 \begin{tikzpicture}
-  \draw (0,0) -- (1,1);
-  \draw (0,0) -- (1,1);
-  \draw (0,1) -- (1,2);
-  \draw (0,1) -- (1,3);
-  \draw (1.5,2.5) rectangle (0.25,0.25);
+  % Head
+  \draw (0,0) circle (1cm);
+  % Body
+  \draw (0,-1) -- (0,-3);
+  % Arms
+  \draw (-1,-2) -- (0,-1) -- (1,-2);
+  % Legs
+  \draw (-1,-4) -- (0,-3) -- (1,-4);
 \end{tikzpicture}
 ```
+````
 
 This should appear in the output as an image
 
-![](/images/simple-diagram.svg)
+![](/images/stick-figure.svg)
 
 ## Example
 
 Here is the source code for a minimal example: [example.qmd](example.qmd).
+
+## Dependencies
+
+* inkscape
 
 ## Known bugs
 
@@ -45,17 +55,6 @@ Here is the source code for a minimal example: [example.qmd](example.qmd).
   Thus you cannot refer to the figure in the text.
 - But if you use quarto’s fenced divs and give it a name like `#fig-my-diagram` things work fine.
 
-## Render failures
-
-Note that _if ghostscript libraries are not discoverable on your system [we will fail to render SVGs correctly](https://dvisvgm.de/FAQ/)_.
-Getting ghostscript installed appropriately can be fiddly on MacOS;
-On recent macs [it should be sufficient to install MacTex 2023](https://tex.stackexchange.com/a/663229) with the _install ghostscript dynamic library_ option checked.
-Before macTeX 2023 there are workarounds involving setting the ghostscript library path.
-For example if I have Apple Silicon and homebrew ghostscript installed, I can set the following environment variables:
-
-```bash
-export LIBGS=/opt/homebrew/lib/libgs.dylib
-```
 
 ## PDF output
 
@@ -71,11 +70,6 @@ If you use that, make sure you clean it up occasionally, as it will fill up your
 
 A better implementation would use a language cache like other engines in quarto.
 However, developing a a whole tikz language engine feels like a lot more work than I can justify for the current project.
-
-Other optimisations might be possible.
-Note that `dvisvgm` supports a cache via the `--cache` option, and that latex can be fairly good at caching if we allow the intermediate files to persist.
-
-Pull requests for that issue also welcome.
 
 ## Credits
 
