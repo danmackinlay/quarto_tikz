@@ -53,6 +53,7 @@ Here is the source code for a minimal example: [example.qmd](example.qmd).
 
 - all classes and ids are striped from the output figure if you specify them from inside the tikz block, despite my best efforts to explicitly attach them to the generated Figure.
   Thus you cannot refer to the figure in the text if you create a figure by specifying a caption in the tikz block.
+  Probably this could be helped by usig the new [FloatRefTarget](https://quarto.org/docs/prerelease/1.4/lua_changes.html)
 - But if you use quarto’s fenced divs and give it a name like `#fig-my-diagram` things work fine; see [example.qmd](example.qmd).
 
 
