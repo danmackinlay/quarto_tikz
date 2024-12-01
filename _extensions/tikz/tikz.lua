@@ -50,11 +50,11 @@ local function cachedir ()
     if not user_home or user_home == '' then
       return nil
     end
-    cache_home = pandoc.path.join{user_home, '.cache'}
+    cache_home = pandoc.path.join { user_home, '.cache' }
   end
 
   -- Create filter cache directory
-  local cache_dir = pandoc.path.join{cache_home, 'tikz-diagram-filter'}
+  local cache_dir = pandoc.path.join { cache_home, 'tikz-diagram-filter' }
   pandoc.system.make_directory(cache_dir, true)
   return cache_dir
 end
@@ -80,9 +80,6 @@ local function properties_from_code (code, comment_start)
         props[key] = pandoc.utils.block_to_lua(parsed[1])
       end
     else
-    --   -- Remove surrounding quotes from value if present
-    --   value = value:gsub('^"(.*)"$', '%1')
-    --   value = value:gsub("^'(.*)'$", '%1')
       props[key] = value
     end
   end
@@ -90,7 +87,7 @@ local function properties_from_code (code, comment_start)
 end
 
 -- Function to process code block attributes and options
-local function diagram_options (cb)
+local function diagram_options(cb)
   local attribs = properties_from_code(cb.text, '%%')
   for key, value in pairs(cb.attributes) do
     attribs[key] = value
@@ -98,7 +95,7 @@ local function diagram_options (cb)
 
   local alt
   local caption
-  local fig_attr = attribs['fig-attr'] or {id = cb.identifier}
+  local fig_attr = attribs['fig-attr'] or { id = cb.identifier }
   local filename
   local image_attr = {}
   local user_opt = {}
@@ -154,8 +151,8 @@ local function get_cached_image (hash, options)
   end
   -- Include options in the hash to ensure cache invalidation when options change
   local cache_key = pandoc.sha1(hash .. stringify(options))
-  local filename = cache_key .. '.svg'  -- We will use SVG output
-  local imgpath = pandoc.path.join{image_cache, filename}
+  local filename = cache_key .. '.svg' -- We will use SVG output
+  local imgpath = pandoc.path.join { image_cache, filename }
   local imgdata = read_file(imgpath)
   if imgdata then
     return imgdata, 'image/svg+xml'
@@ -171,7 +168,7 @@ local function cache_image (hash, options, imgdata)
   end
   local cache_key = pandoc.sha1(hash .. stringify(options))
   local filename = cache_key .. '.svg'
-  local imgpath = pandoc.path.join{image_cache, filename}
+  local imgpath = pandoc.path.join { image_cache, filename }
   write_file(imgpath, imgdata)
 end
 
@@ -185,12 +182,13 @@ local function compile_tikz_to_svg (code, user_opts)
     error("inkscape not found. Please install Inkscape.")
   end
 
-  return with_temporary_directory("tikz", function(tmpdir)
-    return with_working_directory(tmpdir, function()
+  local function process_in_dir(dir)
+    return with_working_directory(dir, function()
       -- Define file names:
-      local tikz_file = pandoc.path.join{tmpdir, "tikz-image.tex"}
-      local pdf_file = pandoc.path.join{tmpdir, "tikz-image.pdf"}
-      local svg_file = pandoc.path.join{tmpdir, "tikz-image.svg"}
+      local base_filename = basename or "tikz-image"
+      local tikz_file = base_filename .. ".tex"
+      local pdf_file = base_filename .. ".pdf"
+      local svg_file = base_filename .. ".svg"
 
       -- Build the LaTeX document
       local tikz_template = pandoc.template.compile [[
@@ -205,19 +203,19 @@ $body$
 \end{document}
       ]]
       local meta = {
-        ['header-includes'] = {pandoc.RawInline(
+        ['header-includes'] = { pandoc.RawInline(
           'latex',
           stringify(user_opts['header-includes'] or '')
-        )},
-        ['additional-packages'] = {pandoc.RawInline(
+        ) },
+        ['additional-packages'] = { pandoc.RawInline(
           'latex',
           stringify(user_opts['additional-packages'] or '')
-        )},
+        ) },
       }
       local tex_code = pandoc.write(
-        pandoc.Pandoc({pandoc.RawBlock('latex', code)}, meta),
+        pandoc.Pandoc({ pandoc.RawBlock('latex', code) }, meta),
         'latex',
-        {template = tikz_template}
+        { template = tikz_template }
       )
       write_file(tikz_file, tex_code)
 
@@ -225,11 +223,13 @@ $body$
       local success, latex_result = pcall(
         pandoc.pipe,
         'pdflatex',
-        { '-interaction=nonstopmode', '-output-directory', tmpdir, tikz_file },
+        { '-interaction=nonstopmode', tikz_file },
         ''
       )
       if not success then
-        error("Error running pdflatex:\n" .. tostring(latex_result))
+        local log_file = base_filename .. ".log"
+        local log_content = read_file(log_file) or ""
+        error("Error running pdflatex:\n" .. tostring(latex_result) .. "\n" .. log_content)
       end
 
       -- Convert PDF to SVG using Inkscape
@@ -253,12 +253,25 @@ $body$
       end
       return imgdata, 'image/svg+xml'
     end)
-  end)
+  end
+
+  if conf.save_tex then
+    local dir = conf.tex_dir
+    -- Use the basename or hash to create a subdirectory
+    local subdir_name = basename or pandoc.sha1(code)
+    local diagram_dir = pandoc.path.join { dir, subdir_name }
+    pandoc.system.make_directory(diagram_dir, true)
+    return process_in_dir(diagram_dir)
+  else
+    return with_temporary_directory("tikz", function(tmpdir)
+      return process_in_dir(tmpdir)
+    end)
+  end
 end
 
 -- Function to process code blocks and generate figures
 local function code_to_figure(conf)
-  return function (block)
+  return function(block)
     if block.t ~= 'CodeBlock' then
       return nil
     end
@@ -278,12 +291,17 @@ local function code_to_figure(conf)
       imgdata, imgtype = get_cached_image(hash, dgr_opt.opt)
     end
 
+    -- Get basename for file naming
+    local basename = dgr_opt.filename or pandoc.sha1(block.text)
+
     if not imgdata or not imgtype then
       -- No cached image; compile TikZ code
-      local success, result = pcall(compile_tikz_to_svg, block.text, dgr_opt.opt)
+      local success, result = pcall(function()
+        return compile_tikz_to_svg(block.text, dgr_opt.opt, conf, basename)
+      end)
       if not success then
         quarto.log.warning("Error compiling TikZ code: " .. tostring(result))
-        return nil  -- Return the original block unchanged
+        return nil -- Return the original block unchanged
       end
       imgdata, imgtype = result, 'image/svg+xml'
 
@@ -292,7 +310,6 @@ local function code_to_figure(conf)
     end
 
     -- Use the block's filename attribute or create a new name by hashing the image content.
-    local basename = dgr_opt.filename or pandoc.sha1(imgdata)
     local fname = basename .. '.svg'
 
     -- Store the data in the mediabag:
@@ -303,12 +320,12 @@ local function code_to_figure(conf)
 
     -- Create a figure if the diagram has a caption; otherwise return just the image.
     return dgr_opt.caption and
-      pandoc.Figure(
-        pandoc.Plain{image},
-        dgr_opt.caption,
-        dgr_opt['fig-attr']
-      ) or
-      pandoc.Plain{image}
+        pandoc.Figure(
+          pandoc.Plain { image },
+          dgr_opt.caption,
+          dgr_opt['fig-attr']
+        ) or
+        pandoc.Plain { image }
   end
 end
 
@@ -330,15 +347,37 @@ local function configure (meta, format_name)
     image_cache = nil
   end
 
+  -- Handle save-tex option
+  local save_tex = conf['save-tex'] or false
+  local tex_dir = nil
+  if save_tex then
+    if image_cache then
+      -- Both cache and save-tex are enabled; raise a warning and disable save-tex
+      quarto.log.warning("Both 'cache' and 'save-tex' are enabled. Disabling 'save-tex' since caching is active.")
+      save_tex = false
+    else
+      tex_dir = conf['tex-dir']
+      if tex_dir then
+        tex_dir = pandoc.utils.stringify(tex_dir)
+      else
+        -- Use a default directory, e.g., 'tikz-tex'
+        tex_dir = 'tikz-tex'
+      end
+      pandoc.system.make_directory(tex_dir, true)
+    end
+  end
+
   return {
     cache = image_cache and true,
     image_cache = image_cache,
+    save_tex = save_tex,
+    tex_dir = tex_dir,
   }
 end
 
 return {
   {
-    Pandoc = function (doc)
+    Pandoc = function(doc)
       local conf = configure(doc.meta, FORMAT)
       return doc:walk {
         CodeBlock = code_to_figure(conf),

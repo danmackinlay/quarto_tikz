@@ -5,7 +5,9 @@ filters:
 format:
   html: {}
 tikz:
-  cache: true
+  cache: false
+  save-tex: true  # Enable saving intermediate .tex files
+  tex-dir: tikz-tex  # Optional: Specify directory to save .tex files
 ---
 
 # Simple TikZ Diagram
