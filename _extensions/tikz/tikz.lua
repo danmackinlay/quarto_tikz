@@ -173,18 +173,19 @@ local function cache_image (hash, options, imgdata)
 end
 
 -- Function to compile TikZ code to SVG
-local function compile_tikz_to_svg (code, user_opts)
+local function compile_tikz_to_svg(code, user_opts, conf, basename)  -- Added conf and basename parameters
   -- Ensure required dependencies are available
   if not check_dependency('pdflatex') then
-    error("pdflatex not found. Please install LaTeX.")
+    error("pdflatex not found. Please install LaTeX to compile TikZ diagrams.")
   end
   if not check_dependency('inkscape') then
-    error("inkscape not found. Please install Inkscape.")
+    error("Inkscape not found. Please install Inkscape to convert PDFs to SVG.")
   end
 
   local function process_in_dir(dir)
     return with_working_directory(dir, function()
       -- Define file names:
+      -- Use the provided basename or default to "tikz-image"
       local base_filename = basename or "tikz-image"
       local tikz_file = base_filename .. ".tex"
       local pdf_file = base_filename .. ".pdf"
@@ -192,7 +193,7 @@ local function compile_tikz_to_svg (code, user_opts)
 
       -- Build the LaTeX document
       local tikz_template = pandoc.template.compile [[
-\documentclass{standalone}
+\documentclass[border=0pt]{standalone}
 \usepackage{tikz}
 $additional-packages$
 $for(header-includes)$
@@ -229,12 +230,15 @@ $body$
       if not success then
         local log_file = base_filename .. ".log"
         local log_content = read_file(log_file) or ""
-        error("Error running pdflatex:\n" .. tostring(latex_result) .. "\n" .. log_content)
+        error("Error compiling TikZ figure '" .. base_filename .. "':\n" ..
+          tostring(latex_result) .. "\nLaTeX Log:\n" .. log_content ..
+          "\nTikZ Code:\n" .. code)
       end
 
       -- Convert PDF to SVG using Inkscape
       local args = {
         '--pages=1',
+        '--export-area-drawing',
         '--export-type=svg',
         '--export-plain-svg',
         '--export-margin=0',
@@ -243,13 +247,14 @@ $body$
       }
       local success_inkscape, inkscape_result = pcall(pandoc.pipe, 'inkscape', args, '')
       if not success_inkscape then
-        error("Error running inkscape:\n" .. tostring(inkscape_result))
+        error("Error converting PDF to SVG for TikZ figure '" .. base_filename .. "':\n" ..
+          tostring(inkscape_result) .. "\nTikZ Code:\n" .. code)
       end
 
       -- Read the SVG file
       local imgdata = read_file(svg_file)
       if not imgdata then
-        error("Failed to read generated SVG file.")
+        error("Failed to read generated SVG file for TikZ figure '" .. base_filename .. "'.\nTikZ Code:\n" .. code)
       end
       return imgdata, 'image/svg+xml'
     end)
@@ -284,6 +289,9 @@ local function code_to_figure(conf)
     -- Get options from code block
     local dgr_opt = diagram_options(block)
 
+    -- Get basename for file naming
+    local basename = dgr_opt.filename or pandoc.sha1(block.text)
+
     -- Check if image is cached
     local hash = block.text
     local imgdata, imgtype = nil, nil
@@ -291,16 +299,13 @@ local function code_to_figure(conf)
       imgdata, imgtype = get_cached_image(hash, dgr_opt.opt)
     end
 
-    -- Get basename for file naming
-    local basename = dgr_opt.filename or pandoc.sha1(block.text)
-
     if not imgdata or not imgtype then
       -- No cached image; compile TikZ code
       local success, result = pcall(function()
-        return compile_tikz_to_svg(block.text, dgr_opt.opt, conf, basename)
+        return compile_tikz_to_svg(block.text, dgr_opt.opt, conf, basename) -- Pass conf and basename
       end)
       if not success then
-        quarto.log.warning("Error compiling TikZ code: " .. tostring(result))
+        quarto.log.error("Error compiling TikZ figure '" .. basename .. "': " .. tostring(result))
         return nil -- Return the original block unchanged
       end
       imgdata, imgtype = result, 'image/svg+xml'
