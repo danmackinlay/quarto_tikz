@@ -1,0 +1,38 @@
+\documentclass[10pt,tikz]{standalone}
+% \usepackage{tikz} % already loaded by the documentclass
+
+\usepackage{unicode-math} % this also loads fontspec
+\usepackage{xcolor}
+
+\defaultfontfeatures{Scale=MatchLowercase}
+\defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
+\usepackage[bidi=basic]{babel}
+\setmainfont[Numbers=OldStyle]{Charis}
+\setsansfont[Numbers=OldStyle]{Charis}
+\setmonofont[Scale=0.7]{DejaVu Sans Mono}
+
+\usepackage[bidi=basic]{babel}
+\babelfont{rm}[Numbers=OldStyle]{Charis}
+%\usepackage[english]{selnolig} % disable illegal ligatures
+
+\babelfont[arabic]{rm}[Language=Arabic,Renderer=HarfBuzz]{Vazirmatn-Regular}
+\babelfont[arabic]{sf}[Language=Arabic,Renderer=HarfBuzz]{Vazirmatn-Regular}
+\babelfont[arabic]{alt}[Language=Arabic,Renderer=HarfBuzz]{Amiri}
+\babelfont[arabic]{quran}[Language=Arabic,Renderer=HarfBuzz]{Kitab} % need to specify HarfBuzz to fix diacritics/ligatures
+
+%\definecolor{mydarkgray}{RGB}{52, 58, 64}
+\definecolor{mydarkgray}{RGB}{216, 55, 55}
+
+\newcommand\txarb[1]{
+  \foreignlanguage{arabic}{#1}
+}
+
+$additional-packages$
+$for(header-includes)$
+$it$
+$endfor$
+\begin{document}
+\color{mydarkgray}
+$body$
+\end{document}
+      

@@ -14,6 +14,21 @@ local stringify = utils.stringify
 local with_temporary_directory = system.with_temporary_directory
 local with_working_directory = system.with_working_directory
 
+local function get_file_type()
+  if quarto.doc.isFormat("pdf") then
+    return 'pdf'
+  else
+    return 'svg'
+  end
+end
+local function get_mime_type()
+  if quarto.doc.isFormat("pdf") then
+    return 'application/pdf'
+  else
+    return 'image/svg+xml'
+  end
+end
+
 -- Functions to read and write files
 local function read_file (filepath)
   local fh = io.open(filepath, 'rb')
@@ -30,7 +45,9 @@ local function write_file (filepath, content)
   fh:close()
   return true
 end
-
+local function is_python_script(filename)
+  return  string.sub(filename, -3) == '.py'
+end
 -- Function to check if a command exists
 local function check_dependency(cmd)
   local handle = io.popen("command -v " .. cmd .. " 2>/dev/null")
@@ -151,11 +168,11 @@ local function get_cached_image (hash, options)
   end
   -- Include options in the hash to ensure cache invalidation when options change
   local cache_key = pandoc.sha1(hash .. stringify(options))
-  local filename = cache_key .. '.svg' -- We will use SVG output
+  local filename = cache_key .. '.' .. get_file_type() -- We will use SVG output
   local imgpath = pandoc.path.join { image_cache, filename }
   local imgdata = read_file(imgpath)
   if imgdata then
-    return imgdata, 'image/svg+xml'
+    return imgdata, get_mime_type()
   end
   return nil
 end
@@ -167,7 +184,7 @@ local function cache_image (hash, options, imgdata)
     return
   end
   local cache_key = pandoc.sha1(hash .. stringify(options))
-  local filename = cache_key .. '.svg'
+  local filename = cache_key .. '.' .. get_file_type()
   local imgpath = pandoc.path.join { image_cache, filename }
   write_file(imgpath, imgdata)
 end
@@ -175,11 +192,23 @@ end
 -- Function to compile TikZ code to SVG
 local function compile_tikz_to_svg(code, user_opts, conf, basename)  -- Added conf and basename parameters
   -- Ensure required dependencies are available
-  if not check_dependency('pdflatex') then
-    error("pdflatex not found. Please install LaTeX to compile TikZ diagrams.")
+  if not check_dependency('lualatex') then
+    error("lualatex not found. Please install LaTeX to compile TikZ diagrams.")
   end
-  if not check_dependency('inkscape') then
-    error("Inkscape not found. Please install Inkscape to convert PDFs to SVG.")
+  script_path = nil
+  utility_to_run = conf.svg_engine
+  if conf.svg_engine ~= false then
+    if is_python_script(conf.svg_engine) then
+      utility_to_run = 'python3'
+      script_path = pandoc.path.join{pandoc.system.get_working_directory(), conf.svg_engine}
+    end
+    if not check_dependency(utility_to_run) then
+      error(utility_to_run .. " not found. Please install it to convert PDFs to SVG.")
+    end
+  end
+  template_str = nil
+  if conf['template'] ~= "default" then
+    template_str = read_file(conf['template'])
   end
 
   local function process_in_dir(dir)
@@ -190,9 +219,10 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)  -- Added co
       local tikz_file = base_filename .. ".tex"
       local pdf_file = base_filename .. ".pdf"
       local svg_file = base_filename .. ".svg"
+      local dvi_file = base_filename .. ".dvi"
 
       -- Build the LaTeX document
-      local tikz_template = pandoc.template.compile [[
+      local default_template_str = [[
 \documentclass[tikz]{standalone}
 % \usepackage{tikz} % already loaded by the documentclass
 $additional-packages$
@@ -203,6 +233,11 @@ $endfor$
 $body$
 \end{document}
       ]]
+      if template_str == nil then
+        template_str = default_template_str
+      end
+
+      local tikz_template = pandoc.template.compile(template_str)
       local meta = {
         ['header-includes'] = { pandoc.RawInline(
           'latex',
@@ -221,10 +256,15 @@ $body$
       write_file(tikz_file, tex_code)
 
       -- Execute the LaTeX compiler:
+      local latex_args = {} -- '-interaction=nonstopmode' }
+      if conf.svg_engine == 'dvisvgm' then
+        table.insert(latex_args, '--output-format=dvi')
+      end
+      table.insert(latex_args, tikz_file)
       local success, latex_result = pcall(
         pandoc.pipe,
-        'pdflatex',
-        { '-interaction=nonstopmode', tikz_file },
+        'lualatex',
+        latex_args,
         ''
       )
       if not success then
@@ -235,28 +275,53 @@ $body$
           "\nTikZ Code:\n" .. code)
       end
 
-      -- Convert PDF to SVG using Inkscape
-      local args = {
-        '--pages=1',
-        '--export-area-drawing',
-        '--export-type=svg',
-        '--export-plain-svg',
-        '--export-margin=0',
-        '--export-filename=' .. svg_file,
-        pdf_file
-      }
-      local success_inkscape, inkscape_result = pcall(pandoc.pipe, 'inkscape', args, '')
-      if not success_inkscape then
-        error("Error converting PDF to SVG for TikZ figure '" .. base_filename .. "':\n" ..
-          tostring(inkscape_result) .. "\nTikZ Code:\n" .. code)
-      end
+      if conf.svg_engine == false then
+        -- is PDF output, no need to convert to SVG
+        local imgdata = read_file(pdf_file)
+        return imgdata, get_mime_type()
+      else
+        local args = {}
+        if conf.svg_engine == 'inkscape' then
+        -- Convert PDF to SVG using Inkscape
+          args = {
+            '--pages=1',
+            '--export-area-drawing',
+            '--export-type=svg',
+            '--export-plain-svg',
+            '--export-margin=0',
+            '--export-filename=' .. svg_file,
+            pdf_file
+          }
+        elseif conf.svg_engine == 'dvisvgm' then
+          args = {
+            conf.libgs,
+            '--font-format=woff',
+            '--scale=' .. conf.scale,
+            dvi_file,
+            '-o ' .. svg_file
+          }
+        elseif is_python_script(conf.svg_engine) then
+          args = {
+            script_path,
+            pdf_file,
+            svg_file,
+            conf.scale,
+          }
+        end
 
-      -- Read the SVG file
-      local imgdata = read_file(svg_file)
-      if not imgdata then
-        error("Failed to read generated SVG file for TikZ figure '" .. base_filename .. "'.\nTikZ Code:\n" .. code)
+        local success_svg, svg_result = pcall(pandoc.pipe, utility_to_run, args, '')
+        if not success_svg then
+          error("Error converting PDF to SVG for TikZ figure '" .. base_filename .. "':\n" ..
+            tostring(svg_result) .. "\nTikZ Code:\n" .. code)
+        end
+
+        -- Read the SVG file
+        local imgdata = read_file(svg_file)
+        if not imgdata then
+          error("Failed to read generated SVG file for TikZ figure '" .. base_filename .. "'.\nTikZ Code:\n" .. code)
+        end
+        return imgdata, get_mime_type()
       end
-      return imgdata, 'image/svg+xml'
     end)
   end
 
@@ -308,17 +373,18 @@ local function code_to_figure(conf)
         quarto.log.error("Error compiling TikZ figure '" .. basename .. "': " .. tostring(result))
         return nil -- Return the original block unchanged
       end
-      imgdata, imgtype = result, 'image/svg+xml'
+      imgdata, imgtype = result, get_mime_type()
 
       -- Cache the image
       cache_image(hash, dgr_opt.opt, imgdata)
     end
 
     -- Use the block's filename attribute or create a new name by hashing the image content.
-    local fname = basename .. '.svg'
+    local fname = basename .. '.' .. get_file_type()
+    print(fname)
 
     -- Store the data in the mediabag:
-    pandoc.mediabag.insert(fname, 'image/svg+xml', imgdata)
+    pandoc.mediabag.insert(fname, get_mime_type(), imgdata)
 
     -- Create the image object.
     local image = pandoc.Image(dgr_opt.alt, fname, "", dgr_opt['image-attr'])
@@ -371,12 +437,33 @@ local function configure (meta, format_name)
       pandoc.system.make_directory(tex_dir, true)
     end
   end
+  local template = conf['template']
+  if template ~= nil then
+    template = pandoc.utils.stringify(template)
+  end
+  --local use_dvisvgm = conf['use-dvisvgm'] or false
+  local svg_engine = conf['svg-engine'] or false
+  if svg_engine then
+    svg_engine = pandoc.utils.stringify(svg_engine)
+  end
+  local libgs = conf['libgs'] or false
+  if libgs then
+    libgs = pandoc.utils.stringify(libgs)
+  end
+  local scale = conf['scale'] or '1'
+  if scale then
+    scale = pandoc.utils.stringify(scale)
+  end
 
   return {
     cache = image_cache and true,
     image_cache = image_cache,
     save_tex = save_tex,
     tex_dir = tex_dir,
+    template = template,
+    svg_engine = svg_engine,
+    scale = scale,
+    libgs = libgs,
   }
 end
 

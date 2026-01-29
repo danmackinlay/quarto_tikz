@@ -1,0 +1,12 @@
+project:
+  output-dir: pdf_out_dir
+
+format:
+  pdf:
+    keep-tex: true
+    documentclass: scrbook
+    toc: true
+
+tikz:
+  template: template_tikz_pdf.tex
+

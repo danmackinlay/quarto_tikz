@@ -1,0 +1,12 @@
+project:
+  output-dir: docs
+
+format:
+  html:
+    theme: cosmo
+ 
+tikz:
+  template: template_tikz_html.tex
+  svg-engine: pdf2svg.py
+  scale: 1.65
+

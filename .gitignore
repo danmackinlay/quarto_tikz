@@ -54,3 +54,5 @@ luac.out
 *.fls
 *.tex
 _tikz_cache
+/.quarto/
+**/*.quarto_ipynb

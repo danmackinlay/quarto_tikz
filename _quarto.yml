@@ -1,0 +1,25 @@
+project:
+  type: book
+
+profile:
+  group:
+    - [makehtml, makepdf]
+  default: makehtml
+
+book:
+  title: "TikZ Example"
+  author: "The Authors"
+  date: now
+  chapters:
+    - index.qmd
+    - example.qmd
+  downloads: [pdf]
+
+filters:
+  - tikz
+
+tikz:
+  cache: false
+  save-tex: true  # Enable saving intermediate .tex files
+  tex-dir: tikz-tex  # Optional: Specify directory to save .tex files
+

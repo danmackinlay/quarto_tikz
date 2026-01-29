@@ -1,15 +1,3 @@
----
-title: "TikZ Example"
-filters:
-  - tikz
-format:
-  html: {}
-tikz:
-  cache: false
-  save-tex: true  # Enable saving intermediate .tex files
-  tex-dir: tikz-tex  # Optional: Specify directory to save .tex files
----
-
 # Simple TikZ Diagram
 
 Here is a simple TikZ diagram without additional packages or complex features:
@@ -43,6 +31,7 @@ Now, let's look at a more complex example [@fig-example] that uses additional pa
 %%|   id: fig-my-fancy-diagram
 %%|   class: my-class
 %%| additionalPackages: \usepackage{adjustbox}
+
 
 \usetikzlibrary{arrows, arrows.meta}
 \tikzset{
