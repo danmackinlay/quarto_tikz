@@ -220,13 +220,21 @@ $body$
       )
       write_file(tikz_file, tex_code)
 
-      -- Execute the LaTeX compiler:
-      local success, latex_result = pcall(
-        pandoc.pipe,
-        'pdflatex',
-        { '-interaction=nonstopmode', tikz_file },
-        ''
-      )
+      -- Execute the LaTeX compiler with TEXINPUTS so blocks can \input or
+      -- \usepackage shared files from the qmd directory or the extension dir.
+      -- with_environment replaces the entire env, so we merge our override
+      -- onto a copy of the current env to preserve PATH and friends.
+      local env = pandoc.system.environment()
+      env.TEXINPUTS = conf.texinputs
+      local success, latex_result = pcall(function()
+        return pandoc.system.with_environment(env, function()
+          return pandoc.pipe(
+            'pdflatex',
+            { '-interaction=nonstopmode', tikz_file },
+            ''
+          )
+        end)
+      end)
       if not success then
         local log_file = base_filename .. ".log"
         local log_content = read_file(log_file) or ""
@@ -336,6 +344,49 @@ local function code_to_figure(conf)
   end
 end
 
+-- Resolve a (possibly relative) path to an absolute path. Necessary because
+-- pdflatex is launched from a temporary working directory, so any TEXINPUTS
+-- entries that started life as relative paths against the qmd's cwd would
+-- otherwise resolve to nothing.
+local function absolutize(p)
+  if not p or p == '' then return nil end
+  if pandoc.path.is_absolute(p) then return p end
+  local cwd = os.getenv('PWD') or os.getenv('CD') or '.'
+  return pandoc.path.normalize(pandoc.path.join { cwd, p })
+end
+
+-- Build TEXINPUTS so TikZ blocks can \input shared files from the qmd
+-- directory and from the extension's own directory, while preserving any
+-- existing TEXINPUTS and the system default search path.
+local function build_texinputs()
+  -- Path separator: ':' on Unix, ';' on Windows.
+  local sep = (pandoc.system.os == 'windows') and ';' or ':'
+
+  -- Directory of the source qmd. Prefer quarto.doc.input_file; fall back
+  -- to PANDOC_STATE.input_files[1] for older Quarto / plain-pandoc use.
+  local source_file = (quarto and quarto.doc and quarto.doc.input_file)
+    or (PANDOC_STATE and PANDOC_STATE.input_files and PANDOC_STATE.input_files[1])
+  local source_dir = source_file
+    and pandoc.path.directory(absolutize(source_file))
+    or nil
+
+  -- Directory of this filter script (so the extension can ship shared
+  -- .tex/.sty files alongside tikz.lua).
+  local ext_dir = PANDOC_SCRIPT_FILE
+    and pandoc.path.directory(absolutize(PANDOC_SCRIPT_FILE))
+    or nil
+
+  -- Preserve any pre-existing TEXINPUTS from the user's environment.
+  local existing = os.getenv('TEXINPUTS')
+
+  local parts = {}
+  if source_dir then parts[#parts + 1] = source_dir end
+  if ext_dir and ext_dir ~= source_dir then parts[#parts + 1] = ext_dir end
+  if existing and existing ~= '' then parts[#parts + 1] = existing end
+  -- Trailing separator => include system defaults.
+  return table.concat(parts, sep) .. sep
+end
+
 -- Function to configure the filter based on metadata and format
 local function configure (meta, format_name)
   local conf = meta.tikz or {}
@@ -379,6 +430,7 @@ local function configure (meta, format_name)
     image_cache = image_cache,
     save_tex = save_tex,
     tex_dir = tex_dir,
+    texinputs = build_texinputs(),
   }
 end
 

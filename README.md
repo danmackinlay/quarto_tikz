@@ -41,6 +41,42 @@ This should appear in the output as an image
 
 ![](/images/stick-figure.svg)
 
+## Sharing styles between diagrams
+
+If you have a `\tikzset` or a `\usepackage` block that you want to reuse
+across many diagrams, you can put it in a separate file alongside your
+`.qmd` and `\input` (or `\usepackage`) it from each TikZ block. The
+extension sets `TEXINPUTS` before invoking `pdflatex` so that lookups
+resolve in this order:
+
+1. The directory containing the source `.qmd`.
+2. The extension's own directory (`_extensions/tikz/`), so that you can
+   ship shared style files together with the extension itself.
+3. Your system's default LaTeX search path (so `\usepackage{tikz}` etc.
+   continue to work as normal).
+
+For example, drop a `shared-styles.tex` next to your `.qmd`:
+
+```latex
+% shared-styles.tex
+\tikzset{myedge/.style={->, red, thick}}
+```
+
+Then use it from any TikZ block:
+
+````markdown
+```{.tikz}
+\input{shared-styles.tex}
+\begin{tikzpicture}
+  \draw[myedge] (0,0) -- (2,0);
+\end{tikzpicture}
+```
+````
+
+The same mechanism works for a bundled `.sty` file (e.g.
+`\usepackage{shared-styles}`) placed either next to the `.qmd` or
+inside `_extensions/tikz/`.
+
 ## Example
 
 Here is the source code for a minimal example: [example.qmd](example.qmd).
