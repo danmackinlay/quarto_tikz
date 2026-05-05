@@ -235,9 +235,11 @@ $body$
           "\nTikZ Code:\n" .. code)
       end
 
-      -- Convert PDF to SVG using Inkscape
+      -- Convert PDF to SVG using Inkscape.
+      -- Note: --pages=N (Inkscape 1.2+) is omitted because the standalone
+      -- class always produces a single-page PDF, and dropping it preserves
+      -- compatibility with Inkscape 1.0/1.1 (issue #4).
       local args = {
-        '--pages=1',
         '--export-area-drawing',
         '--export-type=svg',
         '--export-plain-svg',
