@@ -79,9 +79,10 @@ Here is the source code for a minimal example: [example.qmd](example.qmd).
 
 ## Dependencies
 
-You need a TeX distribution (TeX Live or MacTeX) and `inkscape` (≥ 1.0)
-installed and on your `PATH`. The filter shells out to a LaTeX engine to
-build a PDF and then to Inkscape to convert that PDF to SVG.
+You need a TeX distribution (TeX Live or MacTeX) on your `PATH`. For
+HTML and other non-PDF outputs you also need `inkscape` (≥ 1.0), which
+converts the intermediate PDF to SVG. When you render only to PDF,
+Inkscape is not required — the intermediate PDF is embedded directly.
 
 `pdflatex` is invoked by default. To use `lualatex` or `xelatex` (e.g.
 for `fontspec` / complex Unicode scripts), set `tikz.tex-engine`
@@ -163,12 +164,19 @@ your `tex-dir` to `.gitignore`.
 
 ## PDF output
 
-The extension always converts each diagram to SVG (via `pdflatex` →
-Inkscape) and embeds that. There is currently no special path for PDF
-output (e.g. directly embedding the intermediate PDF, using `lualatex`
-for richer Unicode coverage, or accepting custom LaTeX templates). For
-that broader set of features see the discussion and proposed work in
-[#5](https://github.com/danmackinlay/quarto_tikz/issues/5). PRs welcome.
+When the Quarto output format is PDF (e.g. `format: pdf`), the
+extension skips the Inkscape conversion step and embeds each TikZ
+diagram's intermediate PDF directly via `\includegraphics`. This
+preserves vector fidelity and fonts in the rendered document, and
+means **Inkscape is not required when you only render to PDF.**
+
+For HTML and other non-PDF formats, the existing `pdflatex` → Inkscape
+→ SVG path is used.
+
+Other features discussed in
+[#5](https://github.com/danmackinlay/quarto_tikz/issues/5) (alternative
+TeX engines, custom templates, alternative SVG converters) are tracked
+separately. PRs welcome.
 
 ## Known bugs
 
