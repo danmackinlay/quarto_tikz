@@ -42,8 +42,8 @@ This should appear in the output as an image
 If you have a `\tikzset` or a `\usepackage` block that you want to reuse
 across many diagrams, you can put it in a separate file alongside your
 `.qmd` and `\input` (or `\usepackage`) it from each TikZ block. The
-extension sets `TEXINPUTS` before invoking `pdflatex` so that lookups
-resolve in this order:
+extension sets `TEXINPUTS` before invoking the TeX engine so that
+lookups resolve in this order:
 
 1. The directory containing the source `.qmd`.
 2. The extension's own directory (`_extensions/tikz/`), so that you can
@@ -92,8 +92,10 @@ accordingly — see the configuration reference below.
 
 ## Caching
 
-Compiling TikZ via `pdflatex` and Inkscape is slow, so the filter has an
-optional content-addressed cache.
+Compiling TikZ is slow — every diagram requires a TeX compile and, for
+non-PDF outputs, a subsequent SVG conversion. The filter has an
+optional content-addressed cache to avoid recompiling unchanged
+diagrams.
 
 Enable it from your project's `_quarto.yml` (or any single document's
 front-matter):
@@ -137,9 +139,9 @@ justify right now.
 
 When a TikZ block silently produces something wrong (or fails to
 compile), the quickest way to diagnose it is to look at the intermediate
-`.tex`, `.pdf` and `.log` files that `pdflatex` actually saw. The
-filter can preserve those for inspection, but **only with caching
-switched off** (see below):
+files (`.tex`, `.pdf` or `.dvi`, and `.log`) the TeX engine actually
+saw. The filter can preserve those for inspection, but **only with
+caching switched off** (see below):
 
 ```yaml
 # in the offending document's front-matter, temporarily
@@ -149,9 +151,9 @@ tikz:
   tex-dir: tikz-tex   # any path; defaults to 'tikz-tex'
 ```
 
-Re-render the document and inspect
-`<tex-dir>/<filename>/<filename>.{tex,pdf,svg,log}`. Running `pdflatex
-<filename>.tex` by hand from inside that directory reproduces the exact
+Re-render the document and inspect the contents of
+`<tex-dir>/<filename>/`. Running your configured TeX engine (default
+`pdflatex`) by hand from inside that directory reproduces the exact
 compilation, and the `.log` is usually enough to spot the problem.
 
 `cache: true` and `save-tex: true` are mutually exclusive: a cache hit
@@ -167,18 +169,19 @@ your `tex-dir` to `.gitignore`.
 ## PDF output
 
 When the Quarto output format is PDF (e.g. `format: pdf`), the
-extension skips the Inkscape conversion step and embeds each TikZ
-diagram's intermediate PDF directly via `\includegraphics`. This
-preserves vector fidelity and fonts in the rendered document, and
-means **Inkscape is not required when you only render to PDF.**
+extension skips SVG conversion entirely and embeds each TikZ diagram's
+intermediate PDF directly via `\includegraphics`. This preserves
+vector fidelity and fonts in the rendered document, and means **no
+SVG converter is required when you only render to PDF.**
 
-For HTML and other non-PDF formats, the existing `pdflatex` → Inkscape
-→ SVG path is used.
+For HTML and other non-PDF formats, the TeX engine's PDF (or DVI, if
+you've set `svg-engine: dvisvgm`) is run through the configured SVG
+converter to produce an embedded SVG.
 
-Other features discussed in
-[#5](https://github.com/danmackinlay/quarto_tikz/issues/5) (alternative
-TeX engines, custom templates, alternative SVG converters) are tracked
-separately. PRs welcome.
+If you need a different TeX engine for the compile (e.g. `lualatex`
+for `fontspec` / complex Unicode scripts) or want to inject a custom
+standalone preamble, see the `tex-engine` and `tex-template` options
+in the [configuration reference](#configuration-reference).
 
 ## Known bugs
 
@@ -254,10 +257,8 @@ Now
 
 ### Figure Attributes Handling
 
-Figure attributes such as `id` and `class` are now set using the `fig-attr` option within the code block comments.
-I think? TBH have not actually tested this
-
-Use `fig-attr` to define figure attributes. For example:
+Figure attributes such as `id` and `class` can be set via the
+`fig-attr` option inside the code block:
 
 ````markdown
 ```{.tikz}
@@ -269,9 +270,11 @@ Use `fig-attr` to define figure attributes. For example:
 ```
 ````
 
-But actually figure attributes in Quarto are dark magic.
-Life is easier if we simply use their fenced divs and give them a name like `#fig-my-diagram`.
-See [example.qmd](example.qmd).
+In practice, figure attributes set this way don't always survive the
+round-trip into the rendered output — see the "Known bugs" section
+above. The reliable pattern is to wrap the block in a Quarto fenced
+div, e.g. `::: {#fig-my-diagram}` … `:::` (as shown in
+[`example.qmd`](example.qmd)).
 
 ````
 ::: {#fig-example .test-class}
@@ -321,38 +324,28 @@ To include additional LaTeX packages, use the `additionalPackages` option within
 
 ### Dependency Changes
 
-The extension now uses `pdflatex` and `inkscape` instead of the older `dvisvgm` and `ghostscript`.
-There were certain advantages to that renderer; I wonder if we should support switchable backends?
-
-Anyway, you need to ensure that both `pdflatex` and `inkscape` are installed and accessible in your system's PATH. If not, install them to avoid rendering issues.
+The extension defaults to `pdflatex` for compilation and `inkscape` for
+PDF → SVG conversion. Both are now configurable via `tikz.tex-engine`
+and `tikz.svg-engine` (the latter also supports `dvisvgm` and
+`pdftocairo` — see the [configuration reference](#configuration-reference)).
+When you only render to PDF, no SVG converter is required at all.
 
 ## Configuration reference
 
-Document- or project-level options (set under `tikz:` in the YAML
-front-matter or `_quarto.yml`):
+Document- or project-level options live under `tikz:` in the YAML
+front-matter or `_quarto.yml`. They cover the compile pipeline,
+caching, and debugging — in addition to the per-block directives set
+inside each TikZ code fence.
 
-- `cache` — boolean, default `false`. Enable the on-disk SVG cache.
-- `cache-dir` — path. Defaults to `$XDG_CACHE_HOME/tikz-diagram-filter`
-  (or the per-user cache equivalent on your platform). Override only if
-  you have a specific reason; otherwise leave unset.
-- `save-tex` — boolean, default `false`. Preserve intermediate
-  `.tex`/`.pdf`/`.log` files for debugging. Ignored (with a warning)
-  when `cache: true`.
-- `tex-dir` — path, default `tikz-tex`. Where preserved intermediates
-  land when `save-tex` is on.
-- `tex-template` — path. If set, the contents of this file replace the
-  built-in `\documentclass[tikz]{standalone}` template. Useful for
-  loading `fontspec`, `babel`, custom colour packages, etc. The
-  template is a [Pandoc template](https://pandoc.org/MANUAL.html#templates),
-  so it must include `$additional-packages$`, `$for(header-includes)$
-  $it$ $endfor$`, and `$body$`. Path is resolved relative to the qmd
-  directory.
+### Compile pipeline
+
 - `tex-engine` — string, default `pdflatex`. Name of the LaTeX
   executable to invoke (`pdflatex`, `lualatex`, `xelatex`, or any other
   TeX engine on your `PATH`). `lualatex` / `xelatex` are useful when
   you need `fontspec`, Unicode shaping (Arabic, Devanagari, etc.) or
   modern font features.
-- `svg-engine` — string, default `inkscape`. PDF/DVI → SVG converter:
+- `svg-engine` — string, default `inkscape`. PDF/DVI → SVG converter
+  used for non-PDF outputs. Supported values:
   - `inkscape` — the default; consumes the PDF produced by the TeX
     engine.
   - `pdftocairo` — from `poppler-utils`. Lightweight alternative if you
@@ -363,11 +356,42 @@ front-matter or `_quarto.yml`):
     TeX-Live-integrated `dvisvgm`; standalone packages may fail to find
     PostScript prologue files.
 
-Per-block directives (set inside the TikZ code block as `%%| key:
-value` lines, as in [`example.qmd`](example.qmd)):
+  When `format: pdf`, the SVG step is skipped entirely (the PDF is
+  embedded directly) and the value of `svg-engine` is ignored.
+- `tex-template` — path. If set, the contents of this file replace the
+  built-in `\documentclass[tikz]{standalone}` template. Useful for
+  loading `fontspec`, `babel`, custom colour packages, etc. The
+  template is a [Pandoc template](https://pandoc.org/MANUAL.html#templates),
+  so it must include `$additional-packages$`, `$for(header-includes)$
+  $it$ $endfor$`, and `$body$`. Path is resolved relative to the qmd
+  directory.
 
-- `filename` — basename for the generated `.tex`/`.pdf`/`.svg`. Defaults
-  to a hash of the code.
+### Caching
+
+- `cache` — boolean, default `false`. Enable the on-disk image cache.
+- `cache-dir` — path. Defaults to `$XDG_CACHE_HOME/tikz-diagram-filter`
+  (or the per-user cache equivalent on your platform). Override only
+  if you have a specific reason; otherwise leave unset.
+
+The cache key folds in the TikZ code, per-block options, the TeX
+engine, the SVG engine, the template, and the output format — so
+toggling any of those invalidates affected entries.
+
+### Debugging
+
+- `save-tex` — boolean, default `false`. Preserve intermediate
+  `.tex`, `.pdf` or `.dvi`, and `.log` files for inspection. Ignored
+  (with a warning) when `cache: true`.
+- `tex-dir` — path, default `tikz-tex`. Where preserved intermediates
+  land when `save-tex` is on.
+
+### Per-block directives
+
+These go inside the TikZ code block as `%%| key: value` lines (see
+[`example.qmd`](example.qmd) for full examples):
+
+- `filename` — basename for the generated files. Defaults to a hash
+  of the code.
 - `caption` — figure caption (Markdown).
 - `alt` — image alt text.
 - `fig-attr:` — nested block of Pandoc figure attributes (`id`,
@@ -376,9 +400,39 @@ value` lines, as in [`example.qmd`](example.qmd)):
   preamble of the synthesized LaTeX document.
 - `header-includes` — additional raw LaTeX inserted into the preamble.
 
-Attributes prefixed with `fig-`, `image-`/`img-`, or `opt-` on the code
-block fence are routed to the figure, the image, or the per-block
+Attributes prefixed with `fig-`, `image-`/`img-`, or `opt-` on the
+code block fence are routed to the figure, the image, or the per-block
 options respectively.
+
+### Recipes
+
+A few common combinations (all go in `_quarto.yml` or document
+front-matter; the filter itself is enabled via `filters: [tikz]`):
+
+```yaml
+# Cached HTML rendering — recommended for projects with many diagrams.
+tikz:
+  cache: true
+```
+
+```yaml
+# Arabic / Devanagari / fontspec via lualatex with a custom preamble.
+tikz:
+  tex-engine: lualatex
+  tex-template: my-fontspec-preamble.tex
+```
+
+```yaml
+# Inkscape-free HTML output using pdftocairo.
+tikz:
+  svg-engine: pdftocairo
+```
+
+```yaml
+# PDF-only project: no SVG converter is invoked at all.
+format:
+  pdf: {}
+```
 
 ## Credits
 
@@ -387,5 +441,7 @@ After spending 2 days of my life getting this working, I found that [there is a 
 There is a bigger and more powerful system [pandoc-ext/diagram](https://github.com/pandoc-ext/diagram/tree/main) which you might prefer to use instead.
 It can “Generate diagrams from embedded code; supports Mermaid, Dot/GraphViz, PlantUML, Asymptote, and TikZ”.
 
-~~The distinction between this and their project is that for this filter inkscape is not a dependency, and we can use the `dvisvgm` backend, but OTOH, their package is better tested, more capable and more general.~~
-This distinction between this project and theirs is that we handle Figures IMO sanely and also are simpler.
+The distinction between this project and theirs is that we handle
+Figures more straightforwardly and the filter is simpler. Both
+projects let you pick between Inkscape and `dvisvgm` as the SVG
+backend.
