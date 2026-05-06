@@ -80,9 +80,11 @@ Here is the source code for a minimal example: [example.qmd](example.qmd).
 ## Dependencies
 
 You need a TeX distribution (TeX Live or MacTeX) on your `PATH`. For
-HTML and other non-PDF outputs you also need `inkscape` (≥ 1.0), which
-converts the intermediate PDF to SVG. When you render only to PDF,
-Inkscape is not required — the intermediate PDF is embedded directly.
+HTML and other non-PDF outputs you also need a PDF/DVI → SVG
+converter; by default that's `inkscape` (≥ 1.0), but you can pick a
+different one via `tikz.svg-engine` (see the configuration reference
+below). When you render only to PDF, no SVG converter is required —
+the intermediate PDF is embedded directly.
 
 `pdflatex` is invoked by default. To use `lualatex` or `xelatex` (e.g.
 for `fontspec` / complex Unicode scripts), set `tikz.tex-engine`
@@ -350,6 +352,16 @@ front-matter or `_quarto.yml`):
   TeX engine on your `PATH`). `lualatex` / `xelatex` are useful when
   you need `fontspec`, Unicode shaping (Arabic, Devanagari, etc.) or
   modern font features.
+- `svg-engine` — string, default `inkscape`. PDF/DVI → SVG converter:
+  - `inkscape` — the default; consumes the PDF produced by the TeX
+    engine.
+  - `pdftocairo` — from `poppler-utils`. Lightweight alternative if you
+    don't want to install Inkscape; also consumes PDF.
+  - `dvisvgm` — consumes a DVI (the filter automatically asks the TeX
+    engine for DVI output in that mode) and embeds fonts as WOFF,
+    keeping text in the rendered SVG selectable. Requires a
+    TeX-Live-integrated `dvisvgm`; standalone packages may fail to find
+    PostScript prologue files.
 
 Per-block directives (set inside the TikZ code block as `%%| key:
 value` lines, as in [`example.qmd`](example.qmd)):
