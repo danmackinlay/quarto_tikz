@@ -153,15 +153,33 @@ local function mime_for_format(format)
   return 'image/svg+xml'
 end
 
+-- Construct a cache filename of the form `<label>.<short-hash>.<format>`.
+-- Including the basename makes a directory listing diagnosable (you can
+-- tell which diagram produced which file at a glance), while the short
+-- hash preserves cache-key uniqueness across code/option changes.
+--
+-- When the caller-supplied basename is the auto-generated SHA1 of the
+-- block's code (40 hex chars), we use a short literal label instead;
+-- repeating the full content hash inside the filename adds no diagnostic
+-- value and bloats the listing.
+local function cache_filename(basename, hash, options, format)
+  local cache_key = pandoc.sha1(hash .. stringify(options))
+  local short = cache_key:sub(1, 8)
+  local label = basename or 'tikz'
+  if #label == 40 and label:match('^[0-9a-f]+$') then
+    label = 'tikz'
+  end
+  return label .. '.' .. short .. '.' .. format
+end
+
 -- Function to get cached image
-local function get_cached_image (hash, options, format)
+local function get_cached_image (basename, hash, options, format)
   if not image_cache then
     return nil
   end
-  -- Include options in the hash to ensure cache invalidation when options change
-  local cache_key = pandoc.sha1(hash .. stringify(options))
-  local filename = cache_key .. '.' .. format
-  local imgpath = pandoc.path.join { image_cache, filename }
+  local imgpath = pandoc.path.join {
+    image_cache, cache_filename(basename, hash, options, format),
+  }
   local imgdata = read_file(imgpath)
   if imgdata then
     return imgdata, mime_for_format(format)
@@ -170,14 +188,14 @@ local function get_cached_image (hash, options, format)
 end
 
 -- Function to cache image
-local function cache_image (hash, options, imgdata, format)
+local function cache_image (basename, hash, options, imgdata, format)
   -- Do nothing if caching is disabled or not possible.
   if not image_cache then
     return
   end
-  local cache_key = pandoc.sha1(hash .. stringify(options))
-  local filename = cache_key .. '.' .. format
-  local imgpath = pandoc.path.join { image_cache, filename }
+  local imgpath = pandoc.path.join {
+    image_cache, cache_filename(basename, hash, options, format),
+  }
   write_file(imgpath, imgdata)
 end
 
@@ -459,7 +477,7 @@ local function code_to_figure(conf)
     local imgdata, imgtype = nil, nil
     local out_format = conf.output_format
     if conf.cache then
-      imgdata, imgtype = get_cached_image(hash, dgr_opt.opt, out_format)
+      imgdata, imgtype = get_cached_image(basename, hash, dgr_opt.opt, out_format)
     end
 
     if not imgdata or not imgtype then
@@ -476,7 +494,7 @@ local function code_to_figure(conf)
       imgdata, imgtype = result, mime or mime_for_format(out_format)
 
       -- Cache the image
-      cache_image(hash, dgr_opt.opt, imgdata, out_format)
+      cache_image(basename, hash, dgr_opt.opt, imgdata, out_format)
     end
 
     -- Use the block's filename attribute or create a new name by hashing the image content.

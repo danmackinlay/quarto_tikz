@@ -146,8 +146,14 @@ By default, cached SVGs are written to a per-user cache directory:
   `~/.cache/tikz-diagram-filter/` if `XDG_CACHE_HOME` is unset).
 - Windows: `%USERPROFILE%\.cache\tikz-diagram-filter\`.
 
-Cache keys are the SHA1 of the TikZ code together with any per-block
-options, so editing either invalidates the entry.
+Cache files are named `<basename>.<short-hash>.<ext>` (e.g.
+`stick-figure.318b4ef1.svg`). The basename comes from the block's
+`%%| filename:` directive (or `tikz` if you didn't set one), and the
+short hash is derived from the TikZ code plus per-block options, the
+TeX engine, the SVG engine, the template, and the output format —
+toggling any of those produces a different cache file. A `ls` of the
+cache directory is therefore enough to tell at a glance which diagram
+in which document each entry came from.
 
 You can override the location with `tikz.cache-dir: <path>`, but doing so
 scatters per-directory cache folders across the tree. **Leaving
@@ -159,9 +165,6 @@ Cleanup today is manual — `rm -rf` the cache dir occasionally, or
 
 Known follow-ups (PRs welcome):
 
-- [#9](https://github.com/danmackinlay/quarto_tikz/issues/9) — include
-  the diagram basename in the cache filename so a directory listing is
-  human-diagnosable.
 - [#10](https://github.com/danmackinlay/quarto_tikz/issues/10) — touch
   cache entries on hit so an external `find -mtime`-based GC reflects
   actual last use.
