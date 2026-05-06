@@ -13,11 +13,7 @@ If you're using version control, you will want to check in this directory.
 
 ## Using
 
-Create a code block with class `.tikz`.
-
-# Simple TikZ Diagram
-
-Here is a simple TikZ diagram without additional packages or complex features:
+Create a code block with class `.tikz`. Here is a simple TikZ diagram without additional packages or complex features:
 
 ````markdown
 ```{.tikz}
@@ -83,30 +79,112 @@ Here is the source code for a minimal example: [example.qmd](example.qmd).
 
 ## Dependencies
 
-* inkscape
+You need both `pdflatex` (TeX Live or MacTeX) and `inkscape` (≥ 1.0)
+installed and on your `PATH`. The filter shells out to `pdflatex` to
+build a PDF and then to Inkscape to convert that PDF to SVG.
 
-## Known bugs
+## Caching
 
-- all classes and ids are striped from the output figure if you specify them from inside the tikz block, despite my best efforts to explicitly attach them to the generated Figure.
-  Thus you cannot refer to the figure in the text if you create a figure by specifying a caption in the tikz block.
-  Probably this could be helped by usig the new [FloatRefTarget](https://quarto.org/docs/prerelease/1.4/lua_changes.html)
-- But if you use quarto’s fenced divs and give it a name like `#fig-my-diagram` things work fine; see [example.qmd](example.qmd).
+Compiling TikZ via `pdflatex` and Inkscape is slow, so the filter has an
+optional content-addressed cache.
 
+Enable it from your project's `_quarto.yml` (or any single document's
+front-matter):
+
+```yaml
+tikz:
+  cache: true
+```
+
+By default, cached SVGs are written to a per-user cache directory:
+
+- Linux/macOS: `$XDG_CACHE_HOME/tikz-diagram-filter/` (falls back to
+  `~/.cache/tikz-diagram-filter/` if `XDG_CACHE_HOME` is unset).
+- Windows: `%USERPROFILE%\.cache\tikz-diagram-filter\`.
+
+Cache keys are the SHA1 of the TikZ code together with any per-block
+options, so editing either invalidates the entry.
+
+You can override the location with `tikz.cache-dir: <path>`, but doing so
+scatters per-directory cache folders across the tree. **Leaving
+`cache-dir` unset and using the default user-level cache is the
+recommended setup.**
+
+Cleanup today is manual — `rm -rf` the cache dir occasionally, or
+`find <cache-dir> -mtime +30 -delete` if you want a time-based sweep.
+
+Known follow-ups (PRs welcome):
+
+- [#9](https://github.com/danmackinlay/quarto_tikz/issues/9) — include
+  the diagram basename in the cache filename so a directory listing is
+  human-diagnosable.
+- [#10](https://github.com/danmackinlay/quarto_tikz/issues/10) — touch
+  cache entries on hit so an external `find -mtime`-based GC reflects
+  actual last use.
+
+A proper Quarto language engine would handle this more cleanly than a
+homegrown cache, but writing one is more work than this project can
+justify right now.
+
+## Debugging a diagram
+
+When a TikZ block silently produces something wrong (or fails to
+compile), the quickest way to diagnose it is to look at the intermediate
+`.tex`, `.pdf` and `.log` files that `pdflatex` actually saw. The
+filter can preserve those for inspection, but **only with caching
+switched off** (see below):
+
+```yaml
+# in the offending document's front-matter, temporarily
+tikz:
+  cache: false
+  save-tex: true
+  tex-dir: tikz-tex   # any path; defaults to 'tikz-tex'
+```
+
+Re-render the document and inspect
+`<tex-dir>/<filename>/<filename>.{tex,pdf,svg,log}`. Running `pdflatex
+<filename>.tex` by hand from inside that directory reproduces the exact
+compilation, and the `.log` is usually enough to spot the problem.
+
+`cache: true` and `save-tex: true` are mutually exclusive: a cache hit
+short-circuits compilation, so no intermediates would ever be written.
+If both are set, the filter logs a warning and disables `save-tex`. So
+debugging is a brief detour: switch caching off, debug, then revert.
+
+`tex-dir` is otherwise inert under `cache: true`. Stale `tikz-tex/`
+directories from previous debugging sessions are safe to delete —
+nothing in the rendered HTML references them. You'll usually want to add
+your `tex-dir` to `.gitignore`.
 
 ## PDF output
 
-This does produce PDFs which can be included in PDF output; I wonder if we could shortcut the PDF rendering and just output as plain LaTeX in that case to integrate into the main LaTeX rendering workflow?
-I’m not suite sure how to handle the TikZ libraries in that case.
+The extension always converts each diagram to SVG (via `pdflatex` →
+Inkscape) and embeds that. There is currently no special path for PDF
+output (e.g. directly embedding the intermediate PDF, using `lualatex`
+for richer Unicode coverage, or accepting custom LaTeX templates). For
+that broader set of features see the discussion and proposed work in
+[#5](https://github.com/danmackinlay/quarto_tikz/issues/5). PRs welcome.
 
-Pull requests welcome.
+## Known bugs
 
-## Efficiency
+Figure attributes set inside the TikZ block (via `%%| fig-attr:`,
+`label:`, `name:`) don't always survive the round-trip into the rendered
+output. The reliable pattern is to wrap the block in a Quarto fenced
+div, which is what the bundled [`example.qmd`](example.qmd) does:
 
-This filter has optional execution caching.
-If you use that, make sure you clean it up occasionally, as it will fill up your disk with diagrams.
+````markdown
+::: {#fig-my-diagram}
+```{.tikz}
+%%| filename: my-diagram
+\begin{tikzpicture}…\end{tikzpicture}
+```
 
-A better implementation would use a language cache like other engines in quarto.
-However, developing a a whole tikz language engine feels like a lot more work than I can justify for the current project.
+Caption goes here.
+:::
+````
+
+This makes `@fig-my-diagram` cross-references work correctly.
 
 
 ## Upgrading from Previous Versions
@@ -233,6 +311,38 @@ The extension now uses `pdflatex` and `inkscape` instead of the older `dvisvgm` 
 There were certain advantages to that renderer; I wonder if we should support switchable backends?
 
 Anyway, you need to ensure that both `pdflatex` and `inkscape` are installed and accessible in your system's PATH. If not, install them to avoid rendering issues.
+
+## Configuration reference
+
+Document- or project-level options (set under `tikz:` in the YAML
+front-matter or `_quarto.yml`):
+
+- `cache` — boolean, default `false`. Enable the on-disk SVG cache.
+- `cache-dir` — path. Defaults to `$XDG_CACHE_HOME/tikz-diagram-filter`
+  (or the per-user cache equivalent on your platform). Override only if
+  you have a specific reason; otherwise leave unset.
+- `save-tex` — boolean, default `false`. Preserve intermediate
+  `.tex`/`.pdf`/`.log` files for debugging. Ignored (with a warning)
+  when `cache: true`.
+- `tex-dir` — path, default `tikz-tex`. Where preserved intermediates
+  land when `save-tex` is on.
+
+Per-block directives (set inside the TikZ code block as `%%| key:
+value` lines, as in [`example.qmd`](example.qmd)):
+
+- `filename` — basename for the generated `.tex`/`.pdf`/`.svg`. Defaults
+  to a hash of the code.
+- `caption` — figure caption (Markdown).
+- `alt` — image alt text.
+- `fig-attr:` — nested block of Pandoc figure attributes (`id`,
+  `class`, etc.).
+- `additionalPackages` — extra `\usepackage{…}` lines added to the
+  preamble of the synthesized LaTeX document.
+- `header-includes` — additional raw LaTeX inserted into the preamble.
+
+Attributes prefixed with `fig-`, `image-`/`img-`, or `opt-` on the code
+block fence are routed to the figure, the image, or the per-block
+options respectively.
 
 ## Credits
 
