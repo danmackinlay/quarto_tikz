@@ -330,6 +330,13 @@ front-matter or `_quarto.yml`):
   when `cache: true`.
 - `tex-dir` — path, default `tikz-tex`. Where preserved intermediates
   land when `save-tex` is on.
+- `tex-template` — path. If set, the contents of this file replace the
+  built-in `\documentclass[tikz]{standalone}` template. Useful for
+  loading `fontspec`, `babel`, custom colour packages, etc. The
+  template is a [Pandoc template](https://pandoc.org/MANUAL.html#templates),
+  so it must include `$additional-packages$`, `$for(header-includes)$
+  $it$ $endfor$`, and `$body$`. Path is resolved relative to the qmd
+  directory.
 - `tex-engine` — string, default `pdflatex`. Name of the LaTeX
   executable to invoke (`pdflatex`, `lualatex`, `xelatex`, or any other
   TeX engine on your `PATH`). `lualatex` / `xelatex` are useful when
