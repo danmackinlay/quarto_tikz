@@ -45,12 +45,17 @@ luac.out
 *.x86_64
 *.hex
 
-## rendering cruft
+## rendering cruft (intermediate files left behind by save-tex
+## debugging or by ad-hoc local renders)
 *.aux
 *.dvi
 *.log
 /images/
 *.fdb_latexmk
 *.fls
-*.tex
-_tikz_cache
+# Project-level rendering output:
+/tikz-tex/
+# Don't ignore .tex files inside _extensions/tikz/ (we may ship sample
+# templates there). Only ignore intermediate .tex output produced by
+# save-tex into the project root or local dirs that aren't extensions.
+/*.tex

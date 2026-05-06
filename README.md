@@ -75,8 +75,8 @@ The supplied URL must serve both `tikzjax.js` and `fonts.css` at its root.
 If you have a `\tikzset` or a `\usepackage` block that you want to reuse
 across many diagrams, you can put it in a separate file alongside your
 `.qmd` and `\input` (or `\usepackage`) it from each TikZ block. The
-extension sets `TEXINPUTS` before invoking `pdflatex` so that lookups
-resolve in this order:
+extension sets `TEXINPUTS` before invoking the TeX engine so that
+lookups resolve in this order:
 
 1. The directory containing the source `.qmd`.
 2. The extension's own directory (`_extensions/tikz/`), so that you can
@@ -187,9 +187,9 @@ justify right now.
 
 When a TikZ block silently produces something wrong (or fails to
 compile), the quickest way to diagnose it is to look at the intermediate
-`.tex`, `.pdf` and `.log` files that `pdflatex` actually saw. The
-filter can preserve those for inspection, but **only with caching
-switched off** (see below):
+files (`.tex`, `.pdf` or `.dvi`, and `.log`) the TeX engine actually
+saw. The filter can preserve those for inspection, but **only with
+caching switched off** (see below):
 
 ```yaml
 # in the offending document's front-matter, temporarily
@@ -199,9 +199,9 @@ tikz:
   tex-dir: tikz-tex   # any path; defaults to 'tikz-tex'
 ```
 
-Re-render the document and inspect
-`<tex-dir>/<filename>/<filename>.{tex,pdf,svg,log}`. Running `pdflatex
-<filename>.tex` by hand from inside that directory reproduces the exact
+Re-render the document and inspect the contents of
+`<tex-dir>/<filename>/`. Running your configured TeX engine (default
+`pdflatex`) by hand from inside that directory reproduces the exact
 compilation, and the `.log` is usually enough to spot the problem.
 
 `cache: true` and `save-tex: true` are mutually exclusive: a cache hit
@@ -217,13 +217,16 @@ your `tex-dir` to `.gitignore`.
 ## PDF output
 
 When the Quarto output format is PDF (e.g. `format: pdf`), the
-extension skips the Inkscape conversion step and embeds each TikZ
+extension skips the SVG conversion step entirely and embeds each TikZ
 diagram's intermediate PDF directly via `\includegraphics`. This
 preserves vector fidelity and fonts in the rendered document, and
-means **Inkscape is not required when you only render to PDF.**
+means **no SVG converter is required when you only render to PDF.**
 
-For HTML and other non-PDF formats, the existing `pdflatex` → Inkscape
-→ SVG path is used.
+For HTML and other non-PDF formats, the TeX engine's PDF (or DVI, if
+you've set `svg-engine: dvisvgm`) is run through the configured SVG
+converter to produce an embedded SVG. See the
+[configuration reference](#configuration-reference) for `tex-engine`,
+`svg-engine`, and `svg-command`.
 
 Blocks with `renderer: tikzjax` are dropped (with a warning) under PDF
 or any other non-HTML output, since client-side JS can't run there.
@@ -376,10 +379,14 @@ To include additional LaTeX packages, use the `additionalPackages` option within
 
 ### Dependency Changes
 
-The extension now uses `pdflatex` and `inkscape` instead of the older `dvisvgm` and `ghostscript`.
-There were certain advantages to that renderer; I wonder if we should support switchable backends?
-
-Anyway, you need to ensure that both `pdflatex` and `inkscape` are installed and accessible in your system's PATH. If not, install them to avoid rendering issues.
+The extension defaults to `pdflatex` for compilation and `inkscape`
+for SVG conversion. Both are now configurable via `tikz.tex-engine`
+and `tikz.svg-engine` (the latter also supports `dvisvgm` and
+`pdftocairo`; for anything else, `tikz.svg-command` is an arbitrary
+external command escape hatch). See the
+[configuration reference](#configuration-reference) and the
+[Recipes](#recipes) section. When you only render to PDF, no SVG
+converter is required at all.
 
 ## Configuration reference
 
@@ -614,5 +621,6 @@ After spending 2 days of my life getting this working, I found that [there is a 
 There is a bigger and more powerful system [pandoc-ext/diagram](https://github.com/pandoc-ext/diagram/tree/main) which you might prefer to use instead.
 It can “Generate diagrams from embedded code; supports Mermaid, Dot/GraphViz, PlantUML, Asymptote, and TikZ”.
 
-~~The distinction between this and their project is that for this filter inkscape is not a dependency, and we can use the `dvisvgm` backend, but OTOH, their package is better tested, more capable and more general.~~
-This distinction between this project and theirs is that we handle Figures IMO sanely and also are simpler.
+The distinction between this project and theirs is that we handle
+Figures more straightforwardly and the filter is simpler. Both
+projects let you pick between Inkscape, `dvisvgm`, and other backends.
