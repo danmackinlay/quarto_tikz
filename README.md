@@ -127,10 +127,16 @@ Under `renderer: tikzjax` (HTML output only) none of the above is
 required: rendering happens in the reader's browser via WebAssembly.
 See [Renderers](#renderers).
 
+For minimal CI environments without Inkscape (e.g. TinyTeX on GitHub
+Actions), see the [Inkscape-free CI recipe](#inkscape-free-ci-tinytex-on-github-actions-etc)
+below.
+
 ## Caching
 
-Compiling TikZ via `pdflatex` and Inkscape is slow, so the filter has an
-optional content-addressed cache.
+Compiling TikZ is slow — every diagram is at least a TeX compile and,
+for non-PDF outputs, an SVG conversion step. The filter has an
+optional content-addressed cache to avoid recompiling unchanged
+diagrams.
 
 Enable it from your project's `_quarto.yml` (or any single document's
 front-matter):
@@ -155,13 +161,17 @@ toggling any of those produces a different cache file. A `ls` of the
 cache directory is therefore enough to tell at a glance which diagram
 in which document each entry came from.
 
-You can override the location with `tikz.cache-dir: <path>`, but doing so
-scatters per-directory cache folders across the tree. **Leaving
-`cache-dir` unset and using the default user-level cache is the
-recommended setup.**
+You can override the location with `tikz.cache-dir: <path>`. For
+solo local development, the default user-level cache is the
+recommended setup — leave `cache-dir` unset. **For projects deployed
+to a build host that doesn't have TeX or Inkscape** (Netlify, etc.),
+set an in-tree `cache-dir` and commit it; see the [cached deployment
+recipe](#cached-deployment-to-a-build-host-without-texinkscape-netlify-etc)
+below.
 
-Cleanup today is manual — `rm -rf` the cache dir occasionally, or
-`find <cache-dir> -mtime +30 -delete` if you want a time-based sweep.
+Cleanup of the user-level cache is manual — `rm -rf` the cache dir
+occasionally, or `find <cache-dir> -mtime +30 -delete` if you want a
+time-based sweep.
 
 Known follow-ups (PRs welcome):
 
@@ -396,7 +406,8 @@ front-matter or `_quarto.yml`):
   executable to invoke (`pdflatex`, `lualatex`, `xelatex`, or any other
   TeX engine on your `PATH`). `lualatex` / `xelatex` are useful when
   you need `fontspec`, Unicode shaping (Arabic, Devanagari, etc.) or
-  modern font features.
+  modern font features — see the [non-Latin scripts recipe](#non-latin-scripts-arabic-devanagari-)
+  for a worked example.
 - `svg-engine` — string, default `inkscape`. PDF/DVI → SVG converter:
   - `inkscape` — the default; consumes the PDF produced by the TeX
     engine.
@@ -433,6 +444,134 @@ value` lines, as in [`example.qmd`](example.qmd)):
 Attributes prefixed with `fig-`, `image-`/`img-`, or `opt-` on the code
 block fence are routed to the figure, the image, or the per-block
 options respectively.
+
+## Recipes
+
+Three common end-to-end setups, each fully worked.
+
+### Inkscape-free CI (TinyTeX on GitHub Actions, etc.)
+
+Inkscape is heavy (~200 MB with X dependencies on Linux), and most
+minimal CI images don't ship it. `dvisvgm` ships with TeX Live, so on
+any runner that already has TeX you can avoid Inkscape entirely:
+
+```yaml
+# _quarto.yml
+tikz:
+  svg-engine: dvisvgm
+```
+
+GitHub Actions workflow:
+
+```yaml
+# .github/workflows/build.yml
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: quarto-dev/quarto-actions/setup@v2
+        with:
+          tinytex: true
+      - run: tlmgr install dvisvgm
+      - uses: quarto-dev/quarto-actions/render@v2
+```
+
+`tlmgr install dvisvgm` is needed because TinyTeX is deliberately
+minimal — `dvisvgm` is in TeX Live but not pre-installed. The package
+itself is small (a few MB; nothing like Inkscape).
+
+Caveat: if you build TikZ blocks that rely on PostScript specials
+(some `pgfplots` 3-D constructs, certain transparency tricks), the
+DVI route may not produce identical output. The bulk of TikZ usage —
+graphical models, flowcharts, causal diagrams, etc. — is unaffected.
+
+### Non-Latin scripts (Arabic, Devanagari, …)
+
+`pdflatex` can't handle complex-shaping scripts. Switch the TeX
+engine to `lualatex` and supply a `fontspec`+`babel` template:
+
+```yaml
+# _quarto.yml
+tikz:
+  tex-engine: lualatex
+  tex-template: tikz-fontspec.tex
+```
+
+A minimal `tikz-fontspec.tex` for Arabic (or other RTL scripts —
+swap the babel font for your script's preferred face):
+
+```latex
+% tikz-fontspec.tex — drop next to your qmd
+\documentclass[tikz]{standalone}
+
+\usepackage{fontspec}
+\usepackage[bidi=basic]{babel}
+
+% Arabic. `Amiri` ships with TeX Live, so no extra install needed.
+\babelprovide[import=ar]{arabic}
+\babelfont[arabic]{rm}{Amiri}
+
+% Devanagari example (uncomment if you need it; needs a Devanagari
+% font installed on the machine, e.g. via `tlmgr install` or system).
+% \babelprovide[import=hi]{hindi}
+% \babelfont[hindi]{rm}{Noto Serif Devanagari}
+
+$additional-packages$
+$for(header-includes)$
+$it$
+$endfor$
+\begin{document}
+$body$
+\end{document}
+```
+
+Then in any `.tikz` block you can use `\foreignlanguage{arabic}{…}`
+or `\textsuperscript`-style macros provided by `babel` to mix scripts
+with the rest of your TikZ content. The template is loaded once at
+filter setup and applied to every block in the project, so individual
+blocks don't need any extra preamble.
+
+If you previously hit "Arabic comes out garbled" with the default
+`pdflatex`+Inkscape pipeline (which doesn't shape complex scripts),
+this is the fix — and you don't need a custom Python/`pymupdf` step
+or a forked extension to get there.
+
+### Cached deployment to a build host without TeX/Inkscape (Netlify, etc.)
+
+Many static-host build environments (Netlify, Vercel, GitHub Pages
+via Actions without TinyTeX) don't have TeX or Inkscape and you
+can't install them. Cache hits never invoke any subprocess, so if
+every block hits the cache, the build host needs nothing.
+
+```yaml
+# _quarto.yml
+tikz:
+  cache: true
+  cache-dir: _tikz-cache   # in-tree, so it travels with the repo
+```
+
+Track `_tikz-cache/` in git (i.e. **do not** add it to `.gitignore`).
+Commit cache files alongside your `.qmd` changes. The build host
+clones the repo, the cache comes with it, and every `.tikz` block
+hits the cache and returns its stored SVG/PDF without invoking
+anything.
+
+Workflow:
+
+1. Edit a `.tikz` block locally.
+2. `quarto render` — populates the cache.
+3. `git add _tikz-cache/ <your-qmd>` and commit.
+4. Push.
+
+Cache filenames are `<basename>.<short-hash>.<ext>` (e.g.
+`stick-figure.318b4ef1.svg`), so a `git diff --stat` of your cache
+commits is human-readable: you can see which diagrams changed.
+
+If you forget step 2 and push a `.tikz` change without re-rendering,
+the build host gets a cache miss, fails the dependency check, logs
+an error, and emits the raw code block in place of the diagram. The
+build itself succeeds — the missing diagram is your signal.
 
 ## Credits
 
