@@ -79,9 +79,13 @@ Here is the source code for a minimal example: [example.qmd](example.qmd).
 
 ## Dependencies
 
-You need both `pdflatex` (TeX Live or MacTeX) and `inkscape` (≥ 1.0)
-installed and on your `PATH`. The filter shells out to `pdflatex` to
+You need a TeX distribution (TeX Live or MacTeX) and `inkscape` (≥ 1.0)
+installed and on your `PATH`. The filter shells out to a LaTeX engine to
 build a PDF and then to Inkscape to convert that PDF to SVG.
+
+`pdflatex` is invoked by default. To use `lualatex` or `xelatex` (e.g.
+for `fontspec` / complex Unicode scripts), set `tikz.tex-engine`
+accordingly — see the configuration reference below.
 
 ## Caching
 
@@ -326,6 +330,11 @@ front-matter or `_quarto.yml`):
   when `cache: true`.
 - `tex-dir` — path, default `tikz-tex`. Where preserved intermediates
   land when `save-tex` is on.
+- `tex-engine` — string, default `pdflatex`. Name of the LaTeX
+  executable to invoke (`pdflatex`, `lualatex`, `xelatex`, or any other
+  TeX engine on your `PATH`). `lualatex` / `xelatex` are useful when
+  you need `fontspec`, Unicode shaping (Arabic, Devanagari, etc.) or
+  modern font features.
 
 Per-block directives (set inside the TikZ code block as `%%| key:
 value` lines, as in [`example.qmd`](example.qmd)):
