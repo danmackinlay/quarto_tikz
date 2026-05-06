@@ -60,6 +60,7 @@ local function cachedir ()
 end
 
 local image_cache = nil  -- Path holding the image cache, or `nil` if the cache is not used.
+local tikzjax_assets_injected = false  -- Guards once-per-document injection of TikZJax JS/CSS.
 
 -- Function to parse properties from code comments
 local function properties_from_code (code, comment_start)
@@ -112,6 +113,8 @@ local function diagram_options(cb)
       user_opt['additional-packages'] = value
     elseif attr_name == 'header-includes' then
       user_opt['header-includes'] = value
+    elseif attr_name == 'renderer' then
+      user_opt['renderer'] = value
     elseif attr_name == 'label' then
       fig_attr.id = value
     elseif attr_name == 'name' then
@@ -176,6 +179,51 @@ local function cache_image (hash, options, imgdata, format)
   local filename = cache_key .. '.' .. format
   local imgpath = pandoc.path.join { image_cache, filename }
   write_file(imgpath, imgdata)
+end
+
+-- Inject TikZJax assets (link + script tags) into the document head exactly
+-- once per render. Subsequent calls are no-ops.
+local function inject_tikzjax_assets(conf)
+  if tikzjax_assets_injected then return end
+  tikzjax_assets_injected = true
+  local url = conf.tikzjax_url
+  local html = string.format(
+    '<link rel="stylesheet" href="%s/fonts.css">\n' ..
+    '<script src="%s/tikzjax.js"></script>',
+    url, url
+  )
+  if quarto and quarto.doc and quarto.doc.include_text then
+    quarto.doc.include_text('in-header', html)
+  else
+    quarto.log.warning(
+      "tikz: cannot inject TikZJax assets automatically — " ..
+      "quarto.doc.include_text unavailable. Add the following to your " ..
+      "include-in-header manually:\n" .. html
+    )
+  end
+end
+
+-- Build a `<script type="text/tikz">` block for client-side rendering by
+-- TikZJax. The user's tikzpicture is wrapped in \begin{document}…\end{document}
+-- (TikZJax provides \documentclass{standalone} itself), with any
+-- additionalPackages / header-includes prepended so the same `.tikz` source
+-- works under either renderer.
+local function embed_tikzjax(code, user_opts, conf)
+  inject_tikzjax_assets(conf)
+  local prelude_parts = {}
+  local additional = stringify(user_opts['additional-packages'] or '')
+  if additional ~= '' then
+    table.insert(prelude_parts, additional)
+  end
+  local headers = stringify(user_opts['header-includes'] or '')
+  if headers ~= '' then
+    table.insert(prelude_parts, headers)
+  end
+  local prelude = table.concat(prelude_parts, '\n')
+  local body = (prelude ~= '' and (prelude .. '\n') or '') ..
+    '\\begin{document}\n' .. code .. '\n\\end{document}'
+  return pandoc.RawBlock('html',
+    '<script type="text/tikz">\n' .. body .. '\n</script>')
 end
 
 -- Function to compile TikZ code to either SVG (default) or PDF (passthrough,
@@ -362,6 +410,47 @@ local function code_to_figure(conf)
     dgr_opt.opt['tex-engine'] = conf.tex_engine
     dgr_opt.opt['svg-engine'] = conf.svg_engine
 
+    -- Resolve the effective rendering pipeline. Per-block %%| renderer: …
+    -- overrides the doc/project-level setting. Default 'latex' uses the
+    -- pdflatex/inkscape (or template/svg-engine) chain configured above;
+    -- 'tikzjax' emits a <script type="text/tikz"> for client-side rendering.
+    local renderer = dgr_opt.opt['renderer'] or conf.renderer or 'latex'
+    -- Fold the renderer into the cache key only when non-default, so existing
+    -- latex-pipeline cache entries (written without a 'renderer' key) stay
+    -- valid.
+    if renderer ~= 'latex' then
+      dgr_opt.opt['renderer'] = renderer
+    end
+
+    -- TikZJax path: emit a <script type="text/tikz"> block for the reader's
+    -- browser to render. Only meaningful for HTML-based output (html,
+    -- revealjs, etc.); for anything else, warn and drop the block.
+    if renderer == 'tikzjax' then
+      local is_html_output =
+        (quarto and quarto.doc and quarto.doc.is_format
+          and quarto.doc.is_format('html:js'))
+        or (FORMAT and FORMAT:match('^html'))
+      if not is_html_output then
+        quarto.log.warning(
+          "tikz: renderer 'tikzjax' only renders to HTML; dropping block " ..
+          "for format '" .. tostring(FORMAT) .. "'. " ..
+          "Set renderer: latex (or remove the override) to render this " ..
+          "block under non-HTML output."
+        )
+        return {}  -- remove the block from the output entirely
+      end
+      local raw = embed_tikzjax(block.text, dgr_opt.opt, conf)
+      -- Figure content takes a list of Blocks; RawBlock plugs in directly
+      -- (unlike the LaTeX path's Image, which is an Inline that needs Plain).
+      return dgr_opt.caption and
+          pandoc.Figure(
+            { raw },
+            dgr_opt.caption,
+            dgr_opt['fig-attr']
+          ) or
+          raw
+    end
+
     -- Get basename for file naming
     local basename = dgr_opt.filename or pandoc.sha1(block.text)
 
@@ -538,6 +627,21 @@ local function configure (meta, format_name)
     out_format = 'pdf'
   end
 
+  -- Rendering pipeline. 'latex' (default) runs the server-side TeX +
+  -- svg-engine chain configured above; 'tikzjax' emits a
+  -- <script type="text/tikz"> for client-side WebAssembly rendering in the
+  -- reader's browser. Per-block %%| renderer: … overrides.
+  local renderer = conf.renderer and stringify(conf.renderer) or 'latex'
+
+  -- Base URL serving tikzjax.js and fonts.css. Defaults to the canonical
+  -- tikzjax.com CDN; users can self-host or pin a fork (e.g. drgrice1's).
+  local tikzjax_url = conf['tikzjax-url']
+    and stringify(conf['tikzjax-url'])
+    or 'https://tikzjax.com/v1'
+  -- Strip a trailing slash so concatenation with /fonts.css and /tikzjax.js
+  -- produces a single separator regardless of how the user wrote the URL.
+  tikzjax_url = tikzjax_url:gsub('/+$', '')
+
   return {
     cache = image_cache and true,
     image_cache = image_cache,
@@ -548,6 +652,8 @@ local function configure (meta, format_name)
     tex_engine = tex_engine,
     svg_engine = svg_engine,
     output_format = out_format,
+    renderer = renderer,
+    tikzjax_url = tikzjax_url,
   }
 end
 
