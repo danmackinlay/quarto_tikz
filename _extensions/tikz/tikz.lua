@@ -144,41 +144,50 @@ local function diagram_options(cb)
   }
 end
 
+-- Map an output format (svg|pdf) to the corresponding MIME type.
+local function mime_for_format(format)
+  if format == 'pdf' then return 'application/pdf' end
+  return 'image/svg+xml'
+end
+
 -- Function to get cached image
-local function get_cached_image (hash, options)
+local function get_cached_image (hash, options, format)
   if not image_cache then
     return nil
   end
   -- Include options in the hash to ensure cache invalidation when options change
   local cache_key = pandoc.sha1(hash .. stringify(options))
-  local filename = cache_key .. '.svg' -- We will use SVG output
+  local filename = cache_key .. '.' .. format
   local imgpath = pandoc.path.join { image_cache, filename }
   local imgdata = read_file(imgpath)
   if imgdata then
-    return imgdata, 'image/svg+xml'
+    return imgdata, mime_for_format(format)
   end
   return nil
 end
 
 -- Function to cache image
-local function cache_image (hash, options, imgdata)
+local function cache_image (hash, options, imgdata, format)
   -- Do nothing if caching is disabled or not possible.
   if not image_cache then
     return
   end
   local cache_key = pandoc.sha1(hash .. stringify(options))
-  local filename = cache_key .. '.svg'
+  local filename = cache_key .. '.' .. format
   local imgpath = pandoc.path.join { image_cache, filename }
   write_file(imgpath, imgdata)
 end
 
--- Function to compile TikZ code to SVG
+-- Function to compile TikZ code to either SVG (default) or PDF (passthrough,
+-- used when the Quarto output format is PDF).
 local function compile_tikz_to_svg(code, user_opts, conf, basename)  -- Added conf and basename parameters
   -- Ensure required dependencies are available
   if not check_dependency(conf.tex_engine) then
     error(conf.tex_engine .. " not found. Please install LaTeX to compile TikZ diagrams.")
   end
-  if not check_dependency('inkscape') then
+  -- Inkscape is only needed when we convert to SVG. For PDF output we embed
+  -- the intermediate PDF directly.
+  if conf.output_format ~= 'pdf' and not check_dependency('inkscape') then
     error("Inkscape not found. Please install Inkscape to convert PDFs to SVG.")
   end
 
@@ -246,6 +255,17 @@ $body$
           "\nTikZ Code:\n" .. code)
       end
 
+      -- For PDF output, embed the intermediate PDF directly — no SVG
+      -- conversion needed. This skips the Inkscape rasterization round-trip
+      -- and preserves vector fidelity / fonts in the rendered PDF.
+      if conf.output_format == 'pdf' then
+        local imgdata = read_file(pdf_file)
+        if not imgdata then
+          error("Failed to read generated PDF file for TikZ figure '" .. base_filename .. "'.\nTikZ Code:\n" .. code)
+        end
+        return imgdata, 'application/pdf'
+      end
+
       -- Convert PDF to SVG using Inkscape.
       -- Note: --pages=N (Inkscape 1.2+) is omitted because the standalone
       -- class always produces a single-page PDF, and dropping it preserves
@@ -303,11 +323,11 @@ local function code_to_figure(conf)
     local dgr_opt = diagram_options(block)
 
     -- Fold doc-level options that influence compilation into the cache key,
-    -- so e.g. editing the tex-template invalidates cached SVGs.
+    -- so editing the template / switching the tex engine / changing the
+    -- output format invalidates cached entries.
     if conf.tex_template_content then
       dgr_opt.opt['tex-template-hash'] = pandoc.sha1(conf.tex_template_content)
     end
-    -- so e.g. switching from pdflatex to lualatex invalidates cached SVGs.
     dgr_opt.opt['tex-engine'] = conf.tex_engine
 
     -- Get basename for file naming
@@ -316,30 +336,33 @@ local function code_to_figure(conf)
     -- Check if image is cached
     local hash = block.text
     local imgdata, imgtype = nil, nil
+    local out_format = conf.output_format
     if conf.cache then
-      imgdata, imgtype = get_cached_image(hash, dgr_opt.opt)
+      imgdata, imgtype = get_cached_image(hash, dgr_opt.opt, out_format)
     end
 
     if not imgdata or not imgtype then
       -- No cached image; compile TikZ code
-      local success, result = pcall(function()
+      local success, result, mime = pcall(function()
         return compile_tikz_to_svg(block.text, dgr_opt.opt, conf, basename) -- Pass conf and basename
       end)
       if not success then
         quarto.log.error("Error compiling TikZ figure '" .. basename .. "': " .. tostring(result))
         return nil -- Return the original block unchanged
       end
-      imgdata, imgtype = result, 'image/svg+xml'
+      -- pcall returns (true, returned_values...) on success; result is the
+      -- imgdata, mime is the MIME string returned by compile_tikz_to_svg.
+      imgdata, imgtype = result, mime or mime_for_format(out_format)
 
       -- Cache the image
-      cache_image(hash, dgr_opt.opt, imgdata)
+      cache_image(hash, dgr_opt.opt, imgdata, out_format)
     end
 
     -- Use the block's filename attribute or create a new name by hashing the image content.
-    local fname = basename .. '.svg'
+    local fname = basename .. '.' .. out_format
 
     -- Store the data in the mediabag:
-    pandoc.mediabag.insert(fname, 'image/svg+xml', imgdata)
+    pandoc.mediabag.insert(fname, imgtype, imgdata)
 
     -- Create the image object.
     local image = pandoc.Image(dgr_opt.alt, fname, "", dgr_opt['image-attr'])
@@ -451,11 +474,19 @@ local function configure (meta, format_name)
       )
     end
   end
+
   -- TeX engine. Defaults to pdflatex (the historical behaviour). Users who
   -- need lualatex/xelatex (e.g. for fontspec, complex Unicode scripts) can
   -- opt in. Anything matching an executable on PATH is accepted.
   local tex_engine = conf['tex-engine']
   tex_engine = tex_engine and pandoc.utils.stringify(tex_engine) or 'pdflatex'
+
+  -- Output format: 'pdf' when the Quarto output format is PDF, otherwise
+  -- 'svg'. Drives whether we run Inkscape or embed the PDF directly.
+  local out_format = 'svg'
+  if quarto and quarto.doc and quarto.doc.isFormat and quarto.doc.isFormat('pdf') then
+    out_format = 'pdf'
+  end
 
   return {
     cache = image_cache and true,
@@ -465,6 +496,7 @@ local function configure (meta, format_name)
     texinputs = build_texinputs(),
     tex_template_content = tex_template_content,
     tex_engine = tex_engine,
+    output_format = out_format,
   }
 end
 
