@@ -175,8 +175,8 @@ end
 -- Function to compile TikZ code to SVG
 local function compile_tikz_to_svg(code, user_opts, conf, basename)  -- Added conf and basename parameters
   -- Ensure required dependencies are available
-  if not check_dependency('pdflatex') then
-    error("pdflatex not found. Please install LaTeX to compile TikZ diagrams.")
+  if not check_dependency(conf.tex_engine) then
+    error(conf.tex_engine .. " not found. Please install LaTeX to compile TikZ diagrams.")
   end
   if not check_dependency('inkscape') then
     error("Inkscape not found. Please install Inkscape to convert PDFs to SVG.")
@@ -232,7 +232,7 @@ $body$
       local success, latex_result = pcall(function()
         return pandoc.system.with_environment(env, function()
           return pandoc.pipe(
-            'pdflatex',
+            conf.tex_engine,
             { '-interaction=nonstopmode', tikz_file },
             ''
           )
@@ -307,6 +307,8 @@ local function code_to_figure(conf)
     if conf.tex_template_content then
       dgr_opt.opt['tex-template-hash'] = pandoc.sha1(conf.tex_template_content)
     end
+    -- so e.g. switching from pdflatex to lualatex invalidates cached SVGs.
+    dgr_opt.opt['tex-engine'] = conf.tex_engine
 
     -- Get basename for file naming
     local basename = dgr_opt.filename or pandoc.sha1(block.text)
@@ -449,6 +451,11 @@ local function configure (meta, format_name)
       )
     end
   end
+  -- TeX engine. Defaults to pdflatex (the historical behaviour). Users who
+  -- need lualatex/xelatex (e.g. for fontspec, complex Unicode scripts) can
+  -- opt in. Anything matching an executable on PATH is accepted.
+  local tex_engine = conf['tex-engine']
+  tex_engine = tex_engine and pandoc.utils.stringify(tex_engine) or 'pdflatex'
 
   return {
     cache = image_cache and true,
@@ -457,6 +464,7 @@ local function configure (meta, format_name)
     tex_dir = tex_dir,
     texinputs = build_texinputs(),
     tex_template_content = tex_template_content,
+    tex_engine = tex_engine,
   }
 end
 
