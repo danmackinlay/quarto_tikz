@@ -185,10 +185,11 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)  -- Added co
   if not check_dependency(conf.tex_engine) then
     error(conf.tex_engine .. " not found. Please install LaTeX to compile TikZ diagrams.")
   end
-  -- Inkscape is only needed when we convert to SVG. For PDF output we embed
-  -- the intermediate PDF directly.
-  if conf.output_format ~= 'pdf' and not check_dependency('inkscape') then
-    error("Inkscape not found. Please install Inkscape to convert PDFs to SVG.")
+  -- The svg-engine is only needed when we actually convert to SVG. For PDF
+  -- output we embed the intermediate PDF directly and the converter is
+  -- never invoked.
+  if conf.output_format ~= 'pdf' and not check_dependency(conf.svg_engine) then
+    error(conf.svg_engine .. " not found. Please install it (the configured svg-engine) to convert TeX output to SVG.")
   end
 
   local function process_in_dir(dir)
@@ -199,6 +200,7 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)  -- Added co
       local tikz_file = base_filename .. ".tex"
       local pdf_file = base_filename .. ".pdf"
       local svg_file = base_filename .. ".svg"
+      local dvi_file = base_filename .. ".dvi"
 
       -- Build the LaTeX document. Use the user's template if they supplied
       -- one via tikz.tex-template; otherwise fall back to the bundled
@@ -238,13 +240,16 @@ $body$
       -- onto a copy of the current env to preserve PATH and friends.
       local env = pandoc.system.environment()
       env.TEXINPUTS = conf.texinputs
+      -- dvisvgm consumes a DVI file, so ask pdflatex for DVI output in that
+      -- case. Otherwise (inkscape) we want the default PDF output.
+      local latex_args = { '-interaction=nonstopmode' }
+      if conf.svg_engine == 'dvisvgm' then
+        table.insert(latex_args, '-output-format=dvi')
+      end
+      table.insert(latex_args, tikz_file)
       local success, latex_result = pcall(function()
         return pandoc.system.with_environment(env, function()
-          return pandoc.pipe(
-            conf.tex_engine,
-            { '-interaction=nonstopmode', tikz_file },
-            ''
-          )
+          return pandoc.pipe(conf.tex_engine, latex_args, '')
         end)
       end)
       if not success then
@@ -266,22 +271,48 @@ $body$
         return imgdata, 'application/pdf'
       end
 
-      -- Convert PDF to SVG using Inkscape.
-      -- Note: --pages=N (Inkscape 1.2+) is omitted because the standalone
-      -- class always produces a single-page PDF, and dropping it preserves
-      -- compatibility with Inkscape 1.0/1.1 (issue #4).
-      local args = {
-        '--export-area-drawing',
-        '--export-type=svg',
-        '--export-plain-svg',
-        '--export-margin=0',
-        '--export-filename=' .. svg_file,
-        pdf_file
-      }
-      local success_inkscape, inkscape_result = pcall(pandoc.pipe, 'inkscape', args, '')
-      if not success_inkscape then
-        error("Error converting PDF to SVG for TikZ figure '" .. base_filename .. "':\n" ..
-          tostring(inkscape_result) .. "\nTikZ Code:\n" .. code)
+      -- Convert TeX output to SVG via the configured svg-engine.
+      local convert_args
+      if conf.svg_engine == 'dvisvgm' then
+        -- dvisvgm reads DVI directly. --font-format=woff embeds fonts as
+        -- WOFF (instead of converting glyphs to paths), which keeps text
+        -- selectable / styleable in the rendered SVG. Note: dvisvgm must
+        -- be the TeX-Live-integrated build (e.g. via tlmgr); standalone
+        -- packages can fail to find the PostScript prologue files.
+        convert_args = {
+          '--font-format=woff',
+          '-o', svg_file,
+          dvi_file,
+        }
+      elseif conf.svg_engine == 'pdftocairo' then
+        -- pdftocairo (poppler-utils) reads PDF and is widely available;
+        -- a good lightweight alternative to Inkscape for systems where
+        -- Inkscape isn't installed.
+        convert_args = {
+          '-svg',
+          pdf_file,
+          svg_file,
+        }
+      else
+        -- Inkscape default. Note: --pages=N (Inkscape 1.2+) is omitted
+        -- because the standalone class always produces a single-page PDF,
+        -- and dropping it preserves compatibility with Inkscape 1.0/1.1
+        -- (issue #4).
+        convert_args = {
+          '--export-area-drawing',
+          '--export-type=svg',
+          '--export-plain-svg',
+          '--export-margin=0',
+          '--export-filename=' .. svg_file,
+          pdf_file,
+        }
+      end
+      local success_convert, convert_result = pcall(
+        pandoc.pipe, conf.svg_engine, convert_args, ''
+      )
+      if not success_convert then
+        error("Error converting to SVG (engine: " .. conf.svg_engine .. ") for TikZ figure '" .. base_filename .. "':\n" ..
+          tostring(convert_result) .. "\nTikZ Code:\n" .. code)
       end
 
       -- Read the SVG file
@@ -323,12 +354,13 @@ local function code_to_figure(conf)
     local dgr_opt = diagram_options(block)
 
     -- Fold doc-level options that influence compilation into the cache key,
-    -- so editing the template / switching the tex engine / changing the
-    -- output format invalidates cached entries.
+    -- so editing the template / switching the tex or svg engine / changing
+    -- the output format invalidates cached entries.
     if conf.tex_template_content then
       dgr_opt.opt['tex-template-hash'] = pandoc.sha1(conf.tex_template_content)
     end
     dgr_opt.opt['tex-engine'] = conf.tex_engine
+    dgr_opt.opt['svg-engine'] = conf.svg_engine
 
     -- Get basename for file naming
     local basename = dgr_opt.filename or pandoc.sha1(block.text)
@@ -481,8 +513,26 @@ local function configure (meta, format_name)
   local tex_engine = conf['tex-engine']
   tex_engine = tex_engine and pandoc.utils.stringify(tex_engine) or 'pdflatex'
 
+  -- SVG engine. Choices:
+  --   inkscape   — default. Consumes the PDF produced by pdflatex.
+  --   pdftocairo — poppler-utils. Lightweight alternative to inkscape;
+  --                also consumes the PDF.
+  --   dvisvgm    — consumes a DVI (we ask pdflatex for -output-format=dvi
+  --                in that case). Embeds fonts as WOFF so text in the
+  --                rendered SVG stays selectable.
+  local svg_engine = conf['svg-engine']
+  svg_engine = svg_engine and pandoc.utils.stringify(svg_engine) or 'inkscape'
+  local supported = { inkscape = true, dvisvgm = true, pdftocairo = true }
+  if not supported[svg_engine] then
+    quarto.log.warning(
+      "tikz: unknown svg-engine '" .. svg_engine ..
+      "' — falling back to inkscape. Supported values: inkscape, dvisvgm, pdftocairo."
+    )
+    svg_engine = 'inkscape'
+  end
+
   -- Output format: 'pdf' when the Quarto output format is PDF, otherwise
-  -- 'svg'. Drives whether we run Inkscape or embed the PDF directly.
+  -- 'svg'. Drives whether we run the SVG engine or embed the PDF directly.
   local out_format = 'svg'
   if quarto and quarto.doc and quarto.doc.isFormat and quarto.doc.isFormat('pdf') then
     out_format = 'pdf'
@@ -496,6 +546,7 @@ local function configure (meta, format_name)
     texinputs = build_texinputs(),
     tex_template_content = tex_template_content,
     tex_engine = tex_engine,
+    svg_engine = svg_engine,
     output_format = out_format,
   }
 end
