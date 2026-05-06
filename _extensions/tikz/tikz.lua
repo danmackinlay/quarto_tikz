@@ -251,11 +251,15 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)  -- Added co
   if not check_dependency(conf.tex_engine) then
     error(conf.tex_engine .. " not found. Please install LaTeX to compile TikZ diagrams.")
   end
-  -- The svg-engine is only needed when we actually convert to SVG. For PDF
-  -- output we embed the intermediate PDF directly and the converter is
-  -- never invoked.
-  if conf.output_format ~= 'pdf' and not check_dependency(conf.svg_engine) then
-    error(conf.svg_engine .. " not found. Please install it (the configured svg-engine) to convert TeX output to SVG.")
+  -- The svg converter is only needed when we actually convert to SVG. For
+  -- PDF output we embed the intermediate PDF directly and nothing here is
+  -- invoked. When a custom svg-command is set, dependency-check the
+  -- command's executable; otherwise the configured svg-engine.
+  if conf.output_format ~= 'pdf' then
+    local svg_cmd = conf.svg_command and conf.svg_command[1] or conf.svg_engine
+    if not check_dependency(svg_cmd) then
+      error(svg_cmd .. " not found. Please install it (the configured svg converter) to convert TeX output to SVG.")
+    end
   end
 
   local function process_in_dir(dir)
@@ -337,9 +341,23 @@ $body$
         return imgdata, 'application/pdf'
       end
 
-      -- Convert TeX output to SVG via the configured svg-engine.
+      -- Convert TeX output to SVG. If the user supplied a custom command
+      -- via `svg-command`, that takes precedence; otherwise dispatch on
+      -- the configured svg-engine.
+      local convert_cmd = conf.svg_engine
       local convert_args
-      if conf.svg_engine == 'dvisvgm' then
+      if conf.svg_command then
+        -- Substitute {input}/{output} placeholders. Element 1 is the
+        -- executable; remaining elements are its args.
+        convert_cmd = conf.svg_command[1]
+        convert_args = {}
+        for i = 2, #conf.svg_command do
+          local arg = conf.svg_command[i]
+            :gsub('{input}', pdf_file)
+            :gsub('{output}', svg_file)
+          convert_args[#convert_args + 1] = arg
+        end
+      elseif conf.svg_engine == 'dvisvgm' then
         -- dvisvgm reads DVI directly. --font-format=woff embeds fonts as
         -- WOFF (instead of converting glyphs to paths), which keeps text
         -- selectable / styleable in the rendered SVG. Note: dvisvgm must
@@ -374,10 +392,10 @@ $body$
         }
       end
       local success_convert, convert_result = pcall(
-        pandoc.pipe, conf.svg_engine, convert_args, ''
+        pandoc.pipe, convert_cmd, convert_args, ''
       )
       if not success_convert then
-        error("Error converting to SVG (engine: " .. conf.svg_engine .. ") for TikZ figure '" .. base_filename .. "':\n" ..
+        error("Error converting to SVG (command: " .. convert_cmd .. ") for TikZ figure '" .. base_filename .. "':\n" ..
           tostring(convert_result) .. "\nTikZ Code:\n" .. code)
       end
 
@@ -427,6 +445,9 @@ local function code_to_figure(conf)
     end
     dgr_opt.opt['tex-engine'] = conf.tex_engine
     dgr_opt.opt['svg-engine'] = conf.svg_engine
+    if conf.svg_command then
+      dgr_opt.opt['svg-command'] = table.concat(conf.svg_command, ' ')
+    end
 
     -- Resolve the effective rendering pipeline. Per-block %%| renderer: …
     -- overrides the doc/project-level setting. Default 'latex' uses the
@@ -638,6 +659,35 @@ local function configure (meta, format_name)
     svg_engine = 'inkscape'
   end
 
+  -- Custom svg-command escape hatch. Lets users wire any external converter
+  -- (pdf2svg, pymupdf script, mutool, …) without us having to bless each by
+  -- name. Two YAML forms are accepted:
+  --   svg-command: "mytool {input} {output}"           # whitespace-tokenized
+  --   svg-command: [mytool, "{input}", "{output}"]     # explicit list (preferred
+  --                                                    # if any path may have spaces)
+  -- {input} expands to the intermediate PDF path; {output} to the target
+  -- SVG path. When set, this takes precedence over svg-engine.
+  local svg_command = nil
+  local svg_command_raw = conf['svg-command']
+  if svg_command_raw then
+    local parts = {}
+    if pandoc.utils.type(svg_command_raw) == 'List' then
+      for _, item in ipairs(svg_command_raw) do
+        parts[#parts + 1] = pandoc.utils.stringify(item)
+      end
+    else
+      local s = pandoc.utils.stringify(svg_command_raw)
+      for word in s:gmatch('%S+') do
+        parts[#parts + 1] = word
+      end
+    end
+    if #parts > 0 then
+      svg_command = parts
+    else
+      quarto.log.warning("tikz: svg-command is empty; ignoring.")
+    end
+  end
+
   -- Output format: 'pdf' when the Quarto output format is PDF, otherwise
   -- 'svg'. Drives whether we run the SVG engine or embed the PDF directly.
   local out_format = 'svg'
@@ -669,6 +719,7 @@ local function configure (meta, format_name)
     tex_template_content = tex_template_content,
     tex_engine = tex_engine,
     svg_engine = svg_engine,
+    svg_command = svg_command,
     output_format = out_format,
     renderer = renderer,
     tikzjax_url = tikzjax_url,

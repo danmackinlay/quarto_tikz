@@ -418,6 +418,28 @@ front-matter or `_quarto.yml`):
     keeping text in the rendered SVG selectable. Requires a
     TeX-Live-integrated `dvisvgm`; standalone packages may fail to find
     PostScript prologue files.
+- `svg-command` — string or list. Escape hatch for wiring any other
+  PDF → SVG converter (`pdf2svg`, a `pymupdf` script, `mutool draw`,
+  etc.) without us having to bless each tool individually. The first
+  element is the executable; subsequent elements are arguments, with
+  `{input}` and `{output}` substituted with the intermediate PDF and
+  the target SVG paths respectively. When set, `svg-command` takes
+  precedence over `svg-engine`.
+
+  Two YAML forms are accepted; prefer the list form if any path may
+  contain whitespace:
+
+  ```yaml
+  tikz:
+    svg-command: "pdf2svg {input} {output}"
+
+  # or, equivalently:
+  tikz:
+    svg-command:
+      - pdf2svg
+      - "{input}"
+      - "{output}"
+  ```
 - `renderer` — string, default `latex`. Picks the rendering pipeline:
   `latex` (server-side `tex-engine` + `svg-engine` chain above) or
   `tikzjax` (client-side WebAssembly rendering, HTML output only). See
