@@ -191,8 +191,11 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)  -- Added co
       local pdf_file = base_filename .. ".pdf"
       local svg_file = base_filename .. ".svg"
 
-      -- Build the LaTeX document
-      local tikz_template = pandoc.template.compile [[
+      -- Build the LaTeX document. Use the user's template if they supplied
+      -- one via tikz.tex-template; otherwise fall back to the bundled
+      -- standalone template.
+      local tikz_template = pandoc.template.compile(
+        conf.tex_template_content or [[
 \documentclass[tikz]{standalone}
 % \usepackage{tikz} % already loaded by the documentclass
 $additional-packages$
@@ -202,7 +205,7 @@ $endfor$
 \begin{document}
 $body$
 \end{document}
-      ]]
+      ]])
       local meta = {
         ['header-includes'] = { pandoc.RawInline(
           'latex',
@@ -298,6 +301,12 @@ local function code_to_figure(conf)
 
     -- Get options from code block
     local dgr_opt = diagram_options(block)
+
+    -- Fold doc-level options that influence compilation into the cache key,
+    -- so e.g. editing the tex-template invalidates cached SVGs.
+    if conf.tex_template_content then
+      dgr_opt.opt['tex-template-hash'] = pandoc.sha1(conf.tex_template_content)
+    end
 
     -- Get basename for file naming
     local basename = dgr_opt.filename or pandoc.sha1(block.text)
@@ -425,12 +434,29 @@ local function configure (meta, format_name)
     end
   end
 
+  -- Custom LaTeX standalone template. Read once at filter setup so we don't
+  -- pay file I/O per diagram, and so the path resolves against the qmd's
+  -- cwd before with_working_directory changes it.
+  local tex_template_content = nil
+  local tex_template = conf['tex-template']
+  if tex_template then
+    local tex_template_path = absolutize(pandoc.utils.stringify(tex_template))
+    tex_template_content = read_file(tex_template_path)
+    if not tex_template_content then
+      quarto.log.error(
+        "tikz: tex-template not found: " .. tostring(tex_template_path) ..
+        " — falling back to the default template."
+      )
+    end
+  end
+
   return {
     cache = image_cache and true,
     image_cache = image_cache,
     save_tex = save_tex,
     tex_dir = tex_dir,
     texinputs = build_texinputs(),
+    tex_template_content = tex_template_content,
   }
 end
 
