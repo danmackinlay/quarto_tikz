@@ -37,6 +37,39 @@ This should appear in the output as an image
 
 ![](/images/stick-figure.svg)
 
+## Renderers
+
+Two rendering pipelines are available; both consume the same `.tikz` block syntax, so you can switch between them without rewriting blocks.
+
+- **`renderer: latex`** (default) — compiles each block server-side via the configured `tex-engine` (default `pdflatex`) and, for non-PDF outputs, the configured `svg-engine` (default `inkscape`). For PDF output, the intermediate PDF is embedded directly. Works for every output format Quarto supports. Requires a TeX distribution; for non-PDF outputs also a PDF/DVI → SVG converter.
+- **`renderer: tikzjax`** — emits a `<script type="text/tikz">…</script>` tag and loads [TikZJax](https://github.com/artisticat1/obsidian-tikzjax) so the reader's browser renders the diagram client-side via WebAssembly. **No LaTeX or SVG converter needed**, but only works for HTML output and adds ~3 MB of JS/WASM to the first page load. Non-HTML outputs (PDF, docx, …) drop `tikzjax` blocks with a warning — use `renderer: latex` for those.
+
+Pick the renderer document- or project-wide:
+
+```yaml
+tikz:
+  renderer: tikzjax
+```
+
+…or per-block:
+
+````markdown
+```{.tikz}
+%%| renderer: tikzjax
+\begin{tikzpicture}…\end{tikzpicture}
+```
+````
+
+By default the TikZJax assets are loaded from `https://tikzjax.com/v1/`. Override with `tikz.tikzjax-url` if you want to self-host or pin a fork (e.g. [drgrice1/tikzjax](https://github.com/drgrice1/tikzjax)):
+
+```yaml
+tikz:
+  renderer: tikzjax
+  tikzjax-url: https://your.host/path/to/dist
+```
+
+The supplied URL must serve both `tikzjax.js` and `fonts.css` at its root.
+
 ## Sharing styles between diagrams
 
 If you have a `\tikzset` or a `\usepackage` block that you want to reuse
@@ -89,6 +122,10 @@ the intermediate PDF is embedded directly.
 `pdflatex` is invoked by default. To use `lualatex` or `xelatex` (e.g.
 for `fontspec` / complex Unicode scripts), set `tikz.tex-engine`
 accordingly — see the configuration reference below.
+
+Under `renderer: tikzjax` (HTML output only) none of the above is
+required: rendering happens in the reader's browser via WebAssembly.
+See [Renderers](#renderers).
 
 ## Caching
 
@@ -174,6 +211,11 @@ means **Inkscape is not required when you only render to PDF.**
 
 For HTML and other non-PDF formats, the existing `pdflatex` → Inkscape
 → SVG path is used.
+
+Blocks with `renderer: tikzjax` are dropped (with a warning) under PDF
+or any other non-HTML output, since client-side JS can't run there.
+Mixing the two renderers in the same document is fine — only the
+tikzjax-tagged blocks are skipped.
 
 Other features discussed in
 [#5](https://github.com/danmackinlay/quarto_tikz/issues/5) (alternative
@@ -362,6 +404,13 @@ front-matter or `_quarto.yml`):
     keeping text in the rendered SVG selectable. Requires a
     TeX-Live-integrated `dvisvgm`; standalone packages may fail to find
     PostScript prologue files.
+- `renderer` — string, default `latex`. Picks the rendering pipeline:
+  `latex` (server-side `tex-engine` + `svg-engine` chain above) or
+  `tikzjax` (client-side WebAssembly rendering, HTML output only). See
+  [Renderers](#renderers).
+- `tikzjax-url` — string, default `https://tikzjax.com/v1`. Base URL
+  for the TikZJax `tikzjax.js` and `fonts.css` assets when
+  `renderer: tikzjax`. Override to self-host or pin a fork.
 
 Per-block directives (set inside the TikZ code block as `%%| key:
 value` lines, as in [`example.qmd`](example.qmd)):
@@ -375,6 +424,8 @@ value` lines, as in [`example.qmd`](example.qmd)):
 - `additionalPackages` — extra `\usepackage{…}` lines added to the
   preamble of the synthesized LaTeX document.
 - `header-includes` — additional raw LaTeX inserted into the preamble.
+- `renderer` — `latex` or `tikzjax`. Per-block override of the
+  document-level renderer.
 
 Attributes prefixed with `fig-`, `image-`/`img-`, or `opt-` on the code
 block fence are routed to the figure, the image, or the per-block

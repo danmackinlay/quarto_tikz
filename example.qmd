@@ -85,3 +85,19 @@ Now, let's look at a more complex example [@fig-example] that uses additional pa
 
 A fancy TikZ example
 :::
+
+
+## TikZJax (client-side) renderer
+
+The same source can be rendered client-side by [TikZJax](https://github.com/artisticat1/obsidian-tikzjax) instead of compiling LaTeX locally. The block below opts in via `%%| renderer: tikzjax` — the rest of the document still uses the default `latex` renderer. The diagram is rendered by the reader's browser when this page is viewed as HTML; under PDF/docx output the block is skipped with a warning.
+
+```{.tikz}
+%%| renderer: tikzjax
+%%| caption: A circle, drawn by TikZJax in your browser
+
+\begin{tikzpicture}
+  \draw (0,0) circle (1cm);
+  \draw (-1.2,0) -- (1.2,0);
+  \draw (0,-1.2) -- (0,1.2);
+\end{tikzpicture}
+```
