@@ -386,6 +386,18 @@ Anyway, you need to ensure that both `pdflatex` and `inkscape` are installed and
 Document- or project-level options (set under `tikz:` in the YAML
 front-matter or `_quarto.yml`):
 
+> **Note on document- vs project-level merging.** A `tikz:` block in a
+> document's front-matter **replaces** the project-level `tikz:` block
+> wholesale — Quarto does not deep-merge user-defined config keys. So a
+> per-doc `tikz: { cache: true }` meant as a benign repeat will drop
+> every other setting (`cache-dir`, `svg-engine`, `renderer`, …) from
+> `_quarto.yml` and silently fall back to the filter defaults. If you
+> need a per-doc override, repeat every project-level setting you still
+> want; otherwise, omit the `tikz:` block at the doc level entirely and
+> let project-level settings apply. (Note that `filters: - tikz` is
+> separate — that line is required per-doc and unaffected by this
+> merging behaviour.)
+
 - `cache` — boolean, default `false`. Enable the on-disk SVG cache.
 - `cache-dir` — path. Defaults to `$XDG_CACHE_HOME/tikz-diagram-filter`
   (or the per-user cache equivalent on your platform). Override only if
