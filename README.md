@@ -354,6 +354,21 @@ Now
 ```
 ````
 
+The fence-attribute form still works for backward compatibility, but
+**if you set the same option both ways, the `%%|` directive wins** and
+the fence attribute is ignored (with a warning). For example:
+
+````markdown
+```{.tikz filename='bayesnet-3'}
+%%| filename: bayesnet-4
+% → renders as bayesnet-4; a warning notes bayesnet-3 was ignored
+```
+````
+
+Don't set an option in both places. Pick the `%%|` form (it's the
+canonical syntax and matches Quarto's cell-options convention) and
+delete any leftover fence attribute.
+
 ### Figure Attributes Handling
 
 Figure attributes such as `id` and `class` can be set with the
@@ -510,7 +525,11 @@ front-matter or `_quarto.yml`):
   `renderer: tikzjax`. Override to self-host or pin a fork.
 
 Per-block directives (set inside the TikZ code block as `%%| key:
-value` lines, as in [`example.qmd`](example.qmd)):
+value` lines, as in [`example.qmd`](example.qmd)). These may also be
+given as code-block fence attributes (`{.tikz filename=…}`, the
+deprecated pre-1.0 form) — but if a key is set both ways the `%%|`
+directive wins and the fence attribute is ignored with a warning, so
+don't set the same option in both places:
 
 - `filename` — basename for the generated `.tex`/`.pdf`/`.svg`. Defaults
   to a hash of the code.
