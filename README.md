@@ -37,6 +37,62 @@ This should appear in the output as an image
 
 ![](/images/stick-figure.svg)
 
+## Captions and cross-references
+
+There are two ways to give a diagram a caption, and they exist for
+**different goals** — pick based on whether you need to refer to the
+figure from prose.
+
+**1. `%%| caption:` inside the block — for a caption only.**
+
+````markdown
+```{.tikz}
+%%| filename: stick-figure
+%%| caption: A Stick Figure
+
+\begin{tikzpicture}...\end{tikzpicture}
+```
+````
+
+The filter wraps the image in a figure with that caption. This is the
+simplest option and is all you need if you just want a caption under
+the diagram. The figure's `id`/`class` come from `%%| fig-attr:` /
+`label:` / `name:`, but those attributes don't reliably survive
+Quarto's float handling, so a figure made this way is **not
+dependably cross-referenceable** with `@fig-…`.
+
+**2. Quarto's native fenced div — for `@fig-…` cross-references.**
+
+````markdown
+::: {#fig-stick}
+```{.tikz}
+%%| filename: stick-figure
+\begin{tikzpicture}...\end{tikzpicture}
+```
+
+A Stick Figure
+:::
+````
+
+Here Quarto owns the float, so `@fig-stick` resolves correctly. Use
+this whenever you need to reference the figure in text. This is the
+pattern the bundled [`example.qmd`](example.qmd) uses.
+
+| You want… | Use |
+|---|---|
+| Just a caption under the diagram | `%%\| caption:` |
+| A `@fig-…` cross-reference in prose | Quarto fenced div `::: {#fig-…}` |
+| Both caption *and* cross-reference | Fenced div, with the caption as the div's last line |
+
+> [!WARNING]
+> **Don't do both at once.** If you set `%%| caption:` *and* wrap the
+> same block in a `::: {#fig-…}` div that also carries a caption line,
+> the filter emits a figure (because of `%%| caption:`) which Quarto
+> then nests inside *its* figure — you get a figure-within-a-figure
+> with a doubled or empty caption. When you use the fenced div, leave
+> `%%| caption:` out of the block and let the div's last line be the
+> caption.
+
 ## Renderers
 
 Two rendering pipelines are available; both consume the same `.tikz` block syntax, so you can switch between them without rewriting blocks.
@@ -241,22 +297,13 @@ separately. PRs welcome.
 ## Known bugs
 
 Figure attributes set inside the TikZ block (via `%%| fig-attr:`,
-`label:`, `name:`) don't always survive the round-trip into the rendered
-output. The reliable pattern is to wrap the block in a Quarto fenced
-div, which is what the bundled [`example.qmd`](example.qmd) does:
-
-````markdown
-::: {#fig-my-diagram}
-```{.tikz}
-%%| filename: my-diagram
-\begin{tikzpicture}…\end{tikzpicture}
-```
-
-Caption goes here.
-:::
-````
-
-This makes `@fig-my-diagram` cross-references work correctly.
+`label:`, `name:`) don't always survive the round-trip into the
+rendered output, so a figure captioned with `%%| caption:` is not
+dependably cross-referenceable. The reliable pattern for `@fig-…`
+references is to wrap the block in a Quarto fenced div instead — see
+[Captions and cross-references](#captions-and-cross-references) above
+for both methods, when to use each, and the figure-in-a-figure pitfall
+to avoid.
 
 
 ## Upgrading from Previous Versions
@@ -310,12 +357,25 @@ Now
 ```
 ````
 
+The fence-attribute form still works for backward compatibility, but
+**if you set the same option both ways, the `%%|` directive wins** and
+the fence attribute is ignored (with a warning). For example:
+
+````markdown
+```{.tikz filename='bayesnet-3'}
+%%| filename: bayesnet-4
+% → renders as bayesnet-4; a warning notes bayesnet-3 was ignored
+```
+````
+
+Don't set an option in both places. Pick the `%%|` form (it's the
+canonical syntax and matches Quarto's cell-options convention) and
+delete any leftover fence attribute.
+
 ### Figure Attributes Handling
 
-Figure attributes such as `id` and `class` are now set using the `fig-attr` option within the code block comments.
-I think? TBH have not actually tested this
-
-Use `fig-attr` to define figure attributes. For example:
+Figure attributes such as `id` and `class` can be set with the
+`fig-attr` option inside the code block:
 
 ````markdown
 ```{.tikz}
@@ -327,9 +387,13 @@ Use `fig-attr` to define figure attributes. For example:
 ```
 ````
 
-But actually figure attributes in Quarto are dark magic.
-Life is easier if we simply use their fenced divs and give them a name like `#fig-my-diagram`.
-See [example.qmd](example.qmd).
+…but attributes set this way don't reliably survive Quarto's float
+handling, so for anything you need to cross-reference, prefer the
+fenced-div pattern. See
+[Captions and cross-references](#captions-and-cross-references) for the
+full picture (both methods, when to use each, and the
+figure-in-a-figure pitfall). The bundled [`example.qmd`](example.qmd)
+uses the fenced-div form:
 
 ````
 ::: {#fig-example .test-class}
@@ -468,14 +532,21 @@ front-matter or `_quarto.yml`):
   `renderer: tikzjax`. Override to self-host or pin a fork.
 
 Per-block directives (set inside the TikZ code block as `%%| key:
-value` lines, as in [`example.qmd`](example.qmd)):
+value` lines, as in [`example.qmd`](example.qmd)). These may also be
+given as code-block fence attributes (`{.tikz filename=…}`, the
+deprecated pre-1.0 form) — but if a key is set both ways the `%%|`
+directive wins and the fence attribute is ignored with a warning, so
+don't set the same option in both places:
 
 - `filename` — basename for the generated `.tex`/`.pdf`/`.svg`. Defaults
   to a hash of the code.
-- `caption` — figure caption (Markdown).
+- `caption` — figure caption (Markdown). Produces a caption only, not
+  a reliable cross-reference target — see
+  [Captions and cross-references](#captions-and-cross-references).
 - `alt` — image alt text.
 - `fig-attr:` — nested block of Pandoc figure attributes (`id`,
-  `class`, etc.).
+  `class`, etc.). Not dependably honoured for cross-references; see
+  [Captions and cross-references](#captions-and-cross-references).
 - `additionalPackages` — extra `\usepackage{…}` lines added to the
   preamble of the synthesized LaTeX document.
 - `header-includes` — additional raw LaTeX inserted into the preamble.

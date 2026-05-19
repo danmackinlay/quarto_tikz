@@ -89,9 +89,25 @@ end
 
 -- Function to process code block attributes and options
 local function diagram_options(cb)
+  -- The `%%| key: value` comment directives are the canonical, current
+  -- syntax (and match Quarto's cell-options convention). Code-block fence
+  -- attributes (`{.tikz filename=…}`) are the deprecated pre-1.0 form. When
+  -- a key is given both ways, the %%| directive wins; we only let a fence
+  -- attribute through if the %%| form didn't set that key, and we warn on
+  -- any genuine conflict so the silent override becomes visible.
   local attribs = properties_from_code(cb.text, '%%')
   for key, value in pairs(cb.attributes) do
-    attribs[key] = value
+    if attribs[key] == nil then
+      attribs[key] = value
+    elseif attribs[key] ~= value then
+      quarto.log.warning(
+        "tikz: '" .. key .. "' is set both as a code-block fence " ..
+        "attribute (" .. tostring(value) .. ") and via the canonical " ..
+        "%%| " .. key .. ": directive (" .. tostring(attribs[key]) ..
+        "). The %%| directive wins; the fence attribute is ignored. " ..
+        "Remove one to silence this warning."
+      )
+    end
   end
 
   local alt
