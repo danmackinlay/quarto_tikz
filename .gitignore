@@ -59,3 +59,6 @@ luac.out
 # templates there). Only ignore intermediate .tex output produced by
 # save-tex into the project root or local dirs that aren't extensions.
 /*.tex
+
+.vscode/
+.claude/worktrees/
