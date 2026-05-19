@@ -372,6 +372,12 @@ Don't set an option in both places. Pick the `%%|` form (it's the
 canonical syntax and matches Quarto's cell-options convention) and
 delete any leftover fence attribute.
 
+(The sibling project [pandoc-ext/diagram][pandoc-ext-diagram]
+independently reached the same conclusion — its Quarto notes tell users
+to use the `%%|` comment-pipe form rather than fence attributes for the
+filename. We go one step further by detecting the conflict and warning
+rather than silently picking one.)
+
 ### Figure Attributes Handling
 
 Figure attributes such as `id` and `class` can be set with the
@@ -451,6 +457,22 @@ external command escape hatch). See the
 [configuration reference](#configuration-reference) and the
 [Recipes](#recipes) section. When you only render to PDF, no SVG
 converter is required at all.
+
+## Security
+
+Rendering runs external programs (a TeX engine, and an SVG converter).
+The options choosing *which* binary runs — `tikz.tex-engine`,
+`tikz.svg-engine`, `tikz.svg-command` — are read **only** from
+document/project metadata, never from per-block attributes or `%%|`
+directives, so a hostile diagram *body* alone can't run a command.
+
+**Don't render untrusted documents.** Metadata is trusted input: an
+attacker controlling the YAML front-matter can point `svg-command` at
+any program. Separately, TeX can shell out via `\write18` if
+shell-escape is enabled (this filter doesn't pass `-shell-escape`, but a
+wrapper or site `texmf.cnf` might). To harden a pipeline, pin the
+`tikz:` block in `_quarto.yml` so documents can't override it (the
+hardening pattern from [pandoc-ext/diagram][pandoc-ext-diagram]).
 
 ## Configuration reference
 
@@ -689,9 +711,14 @@ build itself succeeds — the missing diagram is your signal.
 
 Created by cribbing the tricks from [knitr/inst/examples/knitr-graphics.Rnw ](https://github.com/yihui/knitr/blob/master/R/engine.R#L348) and [data-intuitive/quarto-d2/](https://github.com/data-intuitive/quarto-d2/).
 After spending 2 days of my life getting this working, I found that [there is a worked example of a tikz filter in pandoc itself](https://pandoc.org/lua-filters.html#building-images-with-tikz).
-There is a bigger and more powerful system [pandoc-ext/diagram](https://github.com/pandoc-ext/diagram/tree/main) which you might prefer to use instead.
-It can “Generate diagrams from embedded code; supports Mermaid, Dot/GraphViz, PlantUML, Asymptote, and TikZ”.
+For many diagram languages in one filter, prefer the mature generalist
+[pandoc-ext/diagram][pandoc-ext-diagram] (Asymptote, GraphViz, Mermaid,
+PlantUML, TikZ, Typst/cetz, D2); some choices here are informed by it.
+This project does *only* TikZ, trading generality for a cache key that
+folds in engine/template/format (theirs keys on source text alone, so
+caching is off by default), `TEXINPUTS` support for shared
+`\input`/preamble files, and a debuggable on-disk cache (the basis of
+the [no-TeX-on-the-build-host recipe](#cached-deployment-to-a-build-host-without-texinkscape-netlify-etc)).
+Both let you pick between Inkscape, `dvisvgm`, and other backends.
 
-The distinction between this project and theirs is that we handle
-Figures more straightforwardly and the filter is simpler. Both
-projects let you pick between Inkscape, `dvisvgm`, and other backends.
+[pandoc-ext-diagram]: https://github.com/pandoc-ext/diagram/tree/main
