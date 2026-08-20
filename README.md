@@ -948,16 +948,19 @@ build itself succeeds — the missing diagram is your signal.
 
 The filter's pure helpers have unit tests — the `latex-passthrough` comment
 stripping, library-loader matching and move/copy split, the cache-key
-encoding, the compile failure paths, and the inline-SVG namespacing. Run them from the repo root:
+encoding and option resolution, the compile failure paths, and the
+inline-SVG namespacing. Run them all from the repo root:
 
 ```sh
-pandoc lua tests/test_passthrough.lua
-pandoc lua tests/test_cache_key.lua
-pandoc lua tests/test_errors.lua
-pandoc lua tests/test_inline_svg.lua
+sh tests/run.sh
 ```
 
-They need nothing beyond `pandoc`, which the extension already requires.
+…or one at a time, e.g. `pandoc lua tests/test_cache_key.lua`.
+
+They need nothing beyond `pandoc`, which the extension already requires: no
+TeX distribution and no SVG converter. That is what lets CI
+(`.github/workflows/test.yml`) run them on every push and pull request
+without installing TeX Live.
 
 ## Credits
 
