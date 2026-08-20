@@ -61,6 +61,7 @@ end
 
 local image_cache = nil  -- Path holding the image cache, or `nil` if the cache is not used.
 local tikzjax_assets_injected = false  -- Guards once-per-document injection of TikZJax JS/CSS.
+local passthrough_header_seen = {}  -- Text already hoisted into the preamble by the latex-passthrough renderer.
 
 -- Function to parse properties from code comments
 local function properties_from_code (code, comment_start)
@@ -85,6 +86,47 @@ local function properties_from_code (code, comment_start)
     end
   end
   return props
+end
+
+-- The rendering pipelines. Both are total: either can serve any output format
+-- it supports, and neither needs to know about the other. Whether a block is
+-- handed to the host LaTeX document instead of being rendered at all is a
+-- separate axis — see `latex-passthrough` below.
+local KNOWN_RENDERERS = { latex = true, tikzjax = true }
+
+-- Coerce an option that may arrive as a YAML boolean (from document metadata)
+-- or as a string (a `%%|` directive is always text) into a Lua boolean.
+-- Returns nil for "unset" and for anything unrecognized, so the caller can
+-- tell the two apart from an explicit `false`.
+local function truthy(value)
+  if value == nil then return nil end
+  if type(value) == 'boolean' then return value end
+  local s = stringify(value):lower():match('^%s*(.-)%s*$')
+  if s == 'true' or s == 'yes' or s == '1' then return true end
+  if s == 'false' or s == 'no' or s == '0' then return false end
+  return nil
+end
+
+-- Validate a renderer name, translating the one that used to exist. `where`
+-- names the source for the warning ("tikz.renderer", "%%| renderer:").
+local function normalize_renderer(value, where)
+  if value == nil then return nil end
+  local name = stringify(value)
+  if KNOWN_RENDERERS[name] then return name end
+  if name == 'latex-passthrough' then
+    quarto.log.warning(
+      "tikz: " .. where .. " no longer takes 'latex-passthrough'. It is now a " ..
+      "separate option, because it decides whether a block is rendered at all " ..
+      "rather than how: set `latex-passthrough: true` and leave `renderer` " ..
+      "saying how the block should be drawn on non-LaTeX outputs. Ignoring it."
+    )
+    return nil
+  end
+  quarto.log.warning(
+    "tikz: unknown " .. where .. " '" .. name .. "' — falling back to 'latex'. " ..
+    "Supported values: latex, tikzjax."
+  )
+  return nil
 end
 
 -- Function to process code block attributes and options
@@ -131,6 +173,10 @@ local function diagram_options(cb)
       user_opt['header-includes'] = value
     elseif attr_name == 'renderer' then
       user_opt['renderer'] = value
+    elseif attr_name == 'latex-passthrough' then
+      -- Named explicitly so it does not fall through to the `latex-` prefix
+      -- rule below and end up as an image attribute.
+      user_opt['latex-passthrough'] = value
     elseif attr_name == 'label' then
       fig_attr.id = value
     elseif attr_name == 'name' then
@@ -213,6 +259,282 @@ local function cache_image (basename, hash, options, imgdata, format)
     image_cache, cache_filename(basename, hash, options, format),
   }
   write_file(imgpath, imgdata)
+end
+
+-- Preamble text hoisted by the latex-passthrough renderer, kept in three
+-- ordered buckets and flushed once at the end of the document walk. Emitting
+-- in bucket order rather than block-encounter order guarantees that a
+-- `\usepackage{pgfplots}` from one block precedes a `\usepgfplotslibrary{…}`
+-- hoisted out of another, and makes the preamble stable under block
+-- reordering.
+local PASSTHROUGH_PACKAGES, PASSTHROUGH_LIBRARIES, PASSTHROUGH_HEADERS = 1, 2, 3
+local passthrough_preamble = { {}, {}, {} }
+local passthrough_header_seen = {}  -- Text already queued, so we emit it once.
+
+-- Queue `text` for the host document's preamble, at most once per render.
+-- Deduplication is by exact text, which is what makes it safe to hoist the
+-- same `\usetikzlibrary{arrows}` or `%%| additionalPackages:` line out of a
+-- dozen blocks: identical strings collapse to one, and anything that differs
+-- is emitted in full rather than being cleverly merged.
+local function hoist(bucket, text)
+  if not text or text == '' then return end
+  if passthrough_header_seen[text] then return end
+  passthrough_header_seen[text] = true
+  local b = passthrough_preamble[bucket]
+  b[#b + 1] = text
+end
+
+-- Emit everything queued above into the host preamble. Called once, after the
+-- document walk, so bucket order is what reaches the `.tex`.
+local function flush_passthrough_preamble()
+  local parts = {}
+  for _, bucket in ipairs(passthrough_preamble) do
+    for _, text in ipairs(bucket) do parts[#parts + 1] = text end
+  end
+  if #parts == 0 then return end
+  local text = table.concat(parts, '\n')
+  if quarto and quarto.doc and quarto.doc.include_text then
+    quarto.doc.include_text('in-header', text)
+  else
+    quarto.log.warning(
+      "tikz: cannot hoist preamble text automatically — " ..
+      "quarto.doc.include_text unavailable. Add the following to your " ..
+      "include-in-header manually:\n" .. text
+    )
+  end
+end
+
+-- Treat an empty attribute (pandoc gives an unlabelled block `identifier = ''`)
+-- as absent, so it can fall through to the next naming candidate.
+local function blank_to_nil(s)
+  if s == nil or s == '' then return nil end
+  return s
+end
+
+-- Split a string into lines, dropping the trailing empty element that a
+-- final newline would otherwise produce.
+local function split_lines(s)
+  local lines = {}
+  for line in (s .. '\n'):gmatch('([^\n]*)\n') do
+    lines[#lines + 1] = line
+  end
+  if lines[#lines] == '' then table.remove(lines) end
+  return lines
+end
+
+-- The library loaders we know how to hoist. All are idempotent — PGF records
+-- "already loaded" globally — which is what lets us *copy* one into the
+-- preamble and leave the body copy in place as a no-op.
+local LOADER_MACROS = {
+  'usetikzlibrary', 'usepgfplotslibrary', 'usepgflibrary', 'usetikzmarklibrary',
+}
+
+-- Preamble-only macros we recognise but never relocate: `\usegdlibrary` has
+-- ordering requirements we can't reason about, and a `\usepackage` in a
+-- passthrough body is an authoring mistake with its own LaTeX error. Both get
+-- a warning pointing at `%%| additionalPackages:`.
+local WARN_ONLY_MACROS = { 'usegdlibrary', 'usepackage' }
+
+-- Return the code portion of a TeX line, dropping any comment. A `%` escaped
+-- as `\%` is a literal percent sign and does not start one. Used only to
+-- decide what to scan; the original line is what gets emitted.
+local function code_part(line)
+  local i = 1
+  while true do
+    local p = line:find('%%', i)
+    if not p then return line end
+    local backslashes, j = 0, p - 1
+    while j >= 1 and line:sub(j, j) == '\\' do
+      backslashes = backslashes + 1
+      j = j - 1
+    end
+    if backslashes % 2 == 0 then return line:sub(1, p - 1) end
+    i = p + 1
+  end
+end
+
+-- Match a line that is *exactly* one library-loading call and nothing else,
+-- returning the macro name and its argument. The argument is matched with
+-- `%b{}` rather than a non-greedy `(.-)}`: the latter backtracks to the last
+-- brace on the line, so `\usetikzlibrary{arrows}\begin{tikzpicture}` would
+-- match with `arrows}\begin{tikzpicture` as its "argument".
+local function match_loader_line(line)
+  local c = code_part(line)
+  for _, macro in ipairs(LOADER_MACROS) do
+    local arg = c:match('^%s*\\' .. macro .. '%s*(%b{})%s*$')
+      or c:match('^%s*\\' .. macro .. '%s*(%b[])%s*$')
+    if arg then return macro, arg:sub(2, -2) end
+  end
+  return nil
+end
+
+-- Split a loader argument into individual library names, so a dozen blocks
+-- opening with `\usetikzlibrary{arrows, arrows.meta}` collapse to two preamble
+-- lines instead of a dozen identical ones. Splitting is only a deduplication
+-- nicety, so we decline it whenever the argument contains a group — cutting on
+-- a comma inside `.style={draw,fill=blue!20}` would fabricate nonsense.
+local function split_libs(arg)
+  if arg:find('[{}]') then return { arg } end
+  local names = {}
+  for raw in arg:gmatch('[^,]+') do
+    local name = raw:match('^%s*(.-)%s*$')
+    if name ~= '' then names[#names + 1] = name end
+  end
+  return names
+end
+
+-- Find every call to one of `macros` in `line` (comments already stripped),
+-- in source order, with the position and balanced argument of each.
+local function scan_loader_calls(line, macros)
+  local found = {}
+  for _, macro in ipairs(macros) do
+    local init = 1
+    while true do
+      local s, e = line:find('\\' .. macro, init, true)
+      if not s then break end
+      init = e + 1
+      -- Reject a longer control sequence (`\usepackages`, say).
+      if not line:sub(e + 1, e + 1):match('%a') then
+        local p = e + 1
+        while line:sub(p, p) == ' ' do p = p + 1 end
+        local arg = line:match('^(%b{})', p) or line:match('^(%b[])', p)
+        found[#found + 1] = {
+          pos = s,
+          macro = macro,
+          arg = arg and arg:sub(2, -2) or nil,
+        }
+      end
+    end
+  end
+  table.sort(found, function(a, b) return a.pos < b.pos end)
+  return found
+end
+
+-- Positions at which a `tikzpicture` environment opens (+1) or closes (-1).
+local function picture_markers(line)
+  local marks = {}
+  for pattern, delta in pairs({ ['\\begin%s*{tikzpicture}'] = 1,
+                                ['\\end%s*{tikzpicture}'] = -1 }) do
+    local init = 1
+    while true do
+      local s, e = line:find(pattern, init)
+      if not s then break end
+      marks[#marks + 1] = { pos = s, delta = delta }
+      init = e + 1
+    end
+  end
+  return marks
+end
+
+-- Prepare a block body for passthrough: hoist the library loads into the host
+-- preamble and drop the `%%|` option directives (they are filter input, not
+-- LaTeX). Returns the preamble lines, the remaining body, and any warnings.
+--
+-- Two passes, because how a load is written decides what we may do with it:
+--
+--   1. A line that is *exactly* one loader call is **moved** — hoisted and
+--      removed from the body. This is the overwhelmingly common shape and it
+--      keeps the shipped `.tex` tidy.
+--   2. A loader call sharing its line with other code cannot be excised
+--      without risking the drawing, so it is **copied**: the preamble gets a
+--      load, the body keeps its own. That is safe because PGF's loaders are
+--      idempotent — the preamble load wins and the body copy becomes a no-op.
+--
+-- Copying matters rather than being merely tidy. `\usetikzlibrary` is legal in
+-- the document body, but a captioned block is emitted inside a `figure`
+-- environment, and PGF records "library loaded" *globally* while the library
+-- file's own definitions are local. Loading inside that group therefore leaves
+-- the definitions behind at `\end{figure}` while suppressing every later load
+-- of the same library — so a *different, later* block fails, with an error
+-- naming PGF math rather than library loading.
+--
+-- What we still refuse to touch: a loader inside a `tikzpicture` (it may be
+-- literal content in a diagram *about* TikZ, and inventing a library name is a
+-- hard error), one whose argument won't brace-balance, and `\usepackage` /
+-- `\usegdlibrary`. Those only produce a warning.
+local function prepare_passthrough_body(code)
+  local preamble, body, warns = {}, {}, {}
+
+  for _, line in ipairs(split_lines(code)) do
+    local macro, arg = match_loader_line(line)
+    if macro then
+      for _, name in ipairs(split_libs(arg)) do
+        preamble[#preamble + 1] = '\\' .. macro .. '{' .. name .. '}'
+      end
+    elseif not line:match('^%s*%%%%|') then
+      body[#body + 1] = line
+    end
+  end
+
+  -- Trim the blank lines the removals leave at either end, so the emitted
+  -- LaTeX starts at the picture.
+  while body[1] and body[1]:match('^%s*$') do table.remove(body, 1) end
+  while body[#body] and body[#body]:match('^%s*$') do table.remove(body) end
+
+  local depth = 0
+  for _, line in ipairs(body) do
+    local c = code_part(line)
+    local marks = picture_markers(c)
+    local function depth_at(pos)
+      local d = depth
+      for _, m in ipairs(marks) do
+        if m.pos < pos then d = d + m.delta end
+      end
+      return d
+    end
+    for _, call in ipairs(scan_loader_calls(c, LOADER_MACROS)) do
+      if depth_at(call.pos) > 0 then
+        warns[#warns + 1] = '\\' .. call.macro ..
+          " inside a tikzpicture is left alone; move it to its own line if it " ..
+          "is meant to load a library: " .. line
+      elseif not call.arg then
+        warns[#warns + 1] = '\\' .. call.macro ..
+          " has no brace-balanced argument, so it cannot be hoisted: " .. line
+      else
+        for _, name in ipairs(split_libs(call.arg)) do
+          preamble[#preamble + 1] = '\\' .. call.macro .. '{' .. name .. '}'
+        end
+      end
+    end
+    for _, call in ipairs(scan_loader_calls(c, WARN_ONLY_MACROS)) do
+      warns[#warns + 1] = '\\' .. call.macro ..
+        " is preamble-only and is never relocated; put it in " ..
+        "`%%| additionalPackages:` instead: " .. line
+    end
+    for _, m in ipairs(marks) do depth = depth + m.delta end
+  end
+
+  return preamble, table.concat(body, '\n'), warns
+end
+
+-- LaTeX passthrough: hand the TikZ source to the host document as raw LaTeX
+-- instead of compiling it to a PDF and embedding the result. The diagram is
+-- then typeset by the same LaTeX run as the surrounding text, which matches
+-- fonts and sizing for free, keeps the source editable in the shipped
+-- `.tex`, and produces no figure files at all.
+--
+-- Everything the standalone wrapper used to supply has to reach the host
+-- preamble instead: `\usepackage{tikz}` (the host document class does not
+-- load it), the block's `additionalPackages` / `header-includes`, and the
+-- `\usetikzlibrary` calls written in the body.
+local function embed_latex_passthrough(code, user_opts, basename)
+  hoist(PASSTHROUGH_PACKAGES, '\\usepackage{tikz}')
+  hoist(PASSTHROUGH_PACKAGES, stringify(user_opts['additional-packages'] or ''))
+  hoist(PASSTHROUGH_HEADERS, stringify(user_opts['header-includes'] or ''))
+  local preamble, body, warns = prepare_passthrough_body(code)
+  for _, text in ipairs(preamble) do
+    hoist(PASSTHROUGH_LIBRARIES, text)
+  end
+  if #warns > 0 then
+    quarto.log.warning(
+      "tikz: renderer 'latex-passthrough', block '" .. tostring(basename) ..
+      "': the following could not be hoisted into the preamble. A library " ..
+      "loaded in the body of a captioned block is scoped to its `figure` " ..
+      "environment, and because PGF records the load globally, later blocks " ..
+      "silently lose the library.\n  - " .. table.concat(warns, '\n  - ')
+    )
+  end
+  return pandoc.RawBlock('latex', body)
 end
 
 -- Inject TikZJax assets (link + script tags) into the document head exactly
@@ -468,16 +790,69 @@ local function code_to_figure(conf)
       dgr_opt.opt['svg-command'] = table.concat(conf.svg_command, ' ')
     end
 
-    -- Resolve the effective rendering pipeline. Per-block %%| renderer: …
-    -- overrides the doc/project-level setting. Default 'latex' uses the
-    -- pdflatex/inkscape (or template/svg-engine) chain configured above;
-    -- 'tikzjax' emits a <script type="text/tikz"> for client-side rendering.
-    local renderer = dgr_opt.opt['renderer'] or conf.renderer or 'latex'
+    -- Resolve the two independent axes.
+    --
+    -- `renderer` says *how* a block is drawn when we have to draw it: 'latex'
+    -- (the pdflatex/inkscape chain configured above) or 'tikzjax' (a
+    -- <script type="text/tikz"> rendered in the reader's browser). Both are
+    -- per-block overridable with %%| renderer: ….
+    local renderer = normalize_renderer(dgr_opt.opt['renderer'], '%%| renderer:')
+      or conf.renderer or 'latex'
+
+    -- `latex-passthrough` says *whether* to draw it at all: under LaTeX output
+    -- the host document can typeset the picture itself, so we hand over the
+    -- source instead of rendering anything. It is deliberately not a renderer
+    -- value — it applies to exactly one output family, and on every other
+    -- format `renderer` above already says what should happen, with no
+    -- fallback policy for this filter to invent.
+    local passthrough = dgr_opt.opt['latex-passthrough']
+    if passthrough ~= nil then
+      local parsed = truthy(passthrough)
+      if parsed == nil then
+        quarto.log.warning(
+          "tikz: %%| latex-passthrough: expects true or false, got '" ..
+          stringify(passthrough) .. "'. Ignoring it."
+        )
+      end
+      passthrough = parsed
+    end
+    if passthrough == nil then passthrough = conf.latex_passthrough end
+    -- Keep it out of the cache key: when passthrough is in force nothing is
+    -- cached, and when it isn't the flag has no bearing on the rendered image.
+    dgr_opt.opt['latex-passthrough'] = nil
+
     -- Fold the renderer into the cache key only when non-default, so existing
     -- latex-pipeline cache entries (written without a 'renderer' key) stay
     -- valid.
     if renderer ~= 'latex' then
       dgr_opt.opt['renderer'] = renderer
+    end
+
+    -- LaTeX passthrough: emit the TikZ source itself, letting the host
+    -- document typeset it. Gated on the output really being LaTeX, so the
+    -- SVG/HTML paths are untouched and a document can carry the flag
+    -- project-wide while still building HTML with whatever `renderer` says.
+    --
+    -- Checked before the renderers, because it decides *whether* to render:
+    -- a `renderer: tikzjax` document with passthrough on must hand its source
+    -- to a LaTeX build, not fall into tikzjax's drop-for-non-HTML rule.
+    if passthrough and conf.output_format == 'pdf' then
+      local raw = embed_latex_passthrough(
+        block.text, dgr_opt.opt,
+        dgr_opt.filename or blank_to_nil(dgr_opt['fig-attr'].id) or '<unnamed>'
+      )
+      -- A captioned block still becomes a pandoc.Figure, exactly as on the
+      -- other two paths, so `%%| caption:` and `fig-attr` behave the same
+      -- whichever renderer is in force; pandoc wraps it in a `figure`
+      -- environment with a `\caption`. An uncaptioned block is emitted bare,
+      -- with no float and no centring, leaving placement to the caller.
+      return dgr_opt.caption and
+          pandoc.Figure(
+            { raw },
+            dgr_opt.caption,
+            dgr_opt['fig-attr']
+          ) or
+          raw
     end
 
     -- TikZJax path: emit a <script type="text/tikz"> block for the reader's
@@ -719,7 +1094,19 @@ local function configure (meta)
   -- svg-engine chain configured above; 'tikzjax' emits a
   -- <script type="text/tikz"> for client-side WebAssembly rendering in the
   -- reader's browser. Per-block %%| renderer: … overrides.
-  local renderer = conf.renderer and stringify(conf.renderer) or 'latex'
+  local renderer = normalize_renderer(conf.renderer, 'tikz.renderer') or 'latex'
+
+  -- Hand TikZ source to the host document instead of rendering it, whenever
+  -- the output format is LaTeX. Orthogonal to `renderer`, which still governs
+  -- every other output format. Per-block %%| latex-passthrough: … overrides.
+  local latex_passthrough = truthy(conf['latex-passthrough'])
+  if latex_passthrough == nil and conf['latex-passthrough'] ~= nil then
+    quarto.log.warning(
+      "tikz: latex-passthrough expects true or false, got '" ..
+      stringify(conf['latex-passthrough']) .. "'. Treating it as false."
+    )
+  end
+  latex_passthrough = latex_passthrough or false
 
   -- Base URL serving tikzjax.js and fonts.css. Defaults to the canonical
   -- tikzjax.com CDN; users can self-host or pin a fork (e.g. drgrice1's).
@@ -742,17 +1129,32 @@ local function configure (meta)
     svg_command = svg_command,
     output_format = out_format,
     renderer = renderer,
+    latex_passthrough = latex_passthrough,
     tikzjax_url = tikzjax_url,
   }
 end
+
+-- Pure helpers, exercised by tests/test_passthrough.lua. Exported as a global
+-- rather than as a key on the returned table: Quarto only accepts integer keys
+-- there and silently drops the whole filter if it finds anything else.
+TIKZ_PASSTHROUGH_TEST = {
+  code_part = code_part,
+  match_loader_line = match_loader_line,
+  split_libs = split_libs,
+  prepare_passthrough_body = prepare_passthrough_body,
+}
 
 return {
   {
     Pandoc = function(doc)
       local conf = configure(doc.meta)
-      return doc:walk {
+      local result = doc:walk {
         CodeBlock = code_to_figure(conf),
       }
+      -- Emit the latex-passthrough preamble once the whole document has been
+      -- seen, so its ordering is ours rather than the blocks' encounter order.
+      flush_passthrough_preamble()
+      return result
     end
-  }
+  },
 }
