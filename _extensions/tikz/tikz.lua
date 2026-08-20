@@ -180,37 +180,18 @@ end
 -- before any of those is what keeps a presentation edit out of the cache key:
 -- `%%|` lines are TeX comments, so removing them cannot change a rendered
 -- byte, while every directive that does influence compilation is folded into
--- the options half of the key separately. Without it, captioning a diagram
--- re-keyed an image that had not changed — invisible locally, fatal on a
--- TeX-less build host rendering from a committed cache. (#28)
+-- the options half of the key separately. (#28)
 --
--- This used to be three parsers with three different ideas of what a `%%|`
--- line is, and they disagreed:
+-- Stripping follows one rule: a directive truncates its line, and a line left
+-- blank by the truncation is dropped, so an indented directive and an absent
+-- one leave the same code behind.
 --
---   * `properties_from_code` ran a single `gmatch` over the whole string for
---     "| key: value\n". Pandoc strips the trailing newline from a CodeBlock,
---     so a directive on the block's *last line* never matched and was
---     silently ignored.
---   * `hashable_code` walked lines and handled that case explicitly, with a
---     test pinning it — so the same line was a directive to the cache key and
---     not a directive to the option reader.
---   * `prepare_passthrough_body` had a third rule, `^%s*%%%%|`, which kept a
---     mid-line directive verbatim and emitted it into the shipped `.tex`.
---
--- Stripping now follows one rule everywhere: a directive truncates its line,
--- and a line left blank by the truncation is dropped, so an indented directive
--- and an absent one leave the same code behind.
---
--- Recognising a directive is deliberately separate from stripping one: a line
+-- Recognising a directive is deliberately separate from stripping one. A line
 -- carrying `%%|` is always stripped, whether or not what follows parses as a
--- key. That is what lets a stale nested block (the old `fig-attr` form) vanish
--- from the code without its sub-lines being resurrected as stray options.
+-- key — which is what stops the sub-lines of a stale nested block reappearing
+-- as stray options.
 --
--- The value is trimmed and an empty one means unset. Both fall out of having
--- one parser: the old pattern required a literal ": " and ran to end of line,
--- so `%%| renderer: latex ` carried its trailing space into an enum lookup and
--- was rejected as unknown, while whether `%%| header-includes:` recorded an
--- empty string or nothing at all turned on invisible trailing whitespace.
+-- A value is trimmed, and an empty one means unset.
 local function split_directives(code)
   local props, kept = {}, {}
   for _, line in ipairs(split_lines(code)) do
