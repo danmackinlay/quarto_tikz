@@ -3,16 +3,8 @@
 -- Run from the repo root:   pandoc lua tests/test_errors.lua
 
 dofile('_extensions/tikz/tikz.lua')
-local failures, checks = 0, 0
-
-local function check(label, got, want)
-  checks = checks + 1
-  if got ~= want then
-    failures = failures + 1
-    io.write(('FAIL %s\n  expected: %s\n  actual:   %s\n')
-      :format(label, tostring(want), tostring(got)))
-  end
-end
+local t = dofile('tests/harness.lua')
+local check = t.check
 
 -- write_file must refuse a nil payload rather than let `fh:write` raise.
 -- That raise is a genuine runtime error, so unlike `error()` it propagates,
@@ -144,5 +136,4 @@ check('unknown embed is rejected', err, nil)
 ok = pcall(TIKZ_TEST.normalize_renderer, 'latex-passthrough', 'tikz.renderer')
 check('migration warning does not raise without quarto', ok, true)
 
-print(('%d checks, %d failures'):format(checks, failures))
-os.exit(failures == 0 and 0 or 1)
+t.done()

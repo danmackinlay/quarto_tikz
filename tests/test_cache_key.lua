@@ -3,16 +3,8 @@
 
 dofile('_extensions/tikz/tikz.lua')
 local C = TIKZ_TEST.canonical_options
-local failures, checks = 0, 0
-
-local function check(label, got, want)
-  checks = checks + 1
-  if got ~= want then
-    failures = failures + 1
-    io.write(('FAIL %s\n  expected: %s\n  actual:   %s\n')
-      :format(label, tostring(want), tostring(got)))
-  end
-end
+local t = dofile('tests/harness.lua')
+local check = t.check
 local function distinct(label, a, b) check(label, C(a) ~= C(b), true) end
 local function same(label, a, b) check(label, C(a), C(b)) end
 
@@ -173,5 +165,4 @@ check('an unknown enum value warns and takes the default',
   ME({['svg-engine'] = 'nonsense'}, 'svg-engine', ENGINES, 'inkscape',
      'inkscape, dvisvgm'), 'inkscape')
 
-print(('%d checks, %d failures'):format(checks, failures))
-os.exit(failures == 0 and 0 or 1)
+t.done()

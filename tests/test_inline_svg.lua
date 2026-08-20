@@ -3,17 +3,9 @@
 
 dofile('_extensions/tikz/tikz.lua')
 local N = TIKZ_TEST.namespace_svg
-local failures, checks = 0, 0
-
-local function check(label, got, want)
-  checks = checks + 1
-  if got ~= want then
-    failures = failures + 1
-    io.write(('FAIL %s\n  expected: %s\n  actual:   %s\n')
-      :format(label, tostring(want), tostring(got)))
-  end
-end
-local function has(s, sub) return s:find(sub, 1, true) ~= nil end
+local t = dofile('tests/harness.lua')
+local check = t.check
+local has = t.has
 
 -- The prolog, DOCTYPE and generator comments are a document's furniture and
 -- must not survive into an HTML page.
@@ -96,5 +88,4 @@ check('captioned image becomes a Figure', fig.t, 'Figure')
 check('…with the image inside a Plain', fig.content[1].t, 'Plain')
 check('…still an Image within it', fig.content[1].content[1].t, 'Image')
 
-print(('%d checks, %d failures'):format(checks, failures))
-os.exit(failures == 0 and 0 or 1)
+t.done()
