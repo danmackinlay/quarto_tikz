@@ -1008,20 +1008,31 @@ local function namespace_svg(svg, nonce, alt)
   return svg
 end
 
--- What the TeX run has to leave behind for the SVG converter to read.
+-- The shape of one LaTeX render: what the TeX run must leave behind, and
+-- whether a converter then runs over it.
 --
--- Only `dvisvgm` consumes a DVI, and only when it is the converter that will
--- actually run. `svg-command` takes precedence over `svg-engine` at
--- conversion time, and its `{input}` is documented as the intermediate PDF,
--- so a custom command always gets a PDF. Deciding this from `svg_engine`
--- alone was the bug: `svg-engine: dvisvgm` together with `svg-command:` asked
--- the TeX engine for DVI and then handed the converter an `{input}` naming a
--- PDF that was never written, failing with a missing-file error that named
--- neither cause.
-local function intermediate_format(svg_engine, svg_command)
-  if svg_command then return 'pdf' end
-  if svg_engine == 'dvisvgm' then return 'dvi' end
-  return 'pdf'
+-- These were two decisions in two places, taken from overlapping inputs, and
+-- they could contradict each other. `intermediate_format` chose DVI from
+-- `svg-engine` alone, without knowing that under LaTeX output the intermediate
+-- *is* the deliverable and no converter runs at all. So `format: pdf` together
+-- with `svg-engine: dvisvgm` asked the TeX engine for a DVI and then read a PDF
+-- nothing had written — every diagram in the document failing with a
+-- missing-file error that named neither cause.
+--
+-- Deciding both here makes that unrepresentable: when nothing is converted, the
+-- intermediate is by definition the format we deliver.
+local function pipeline_for(deliverable, svg_engine, svg_command)
+  -- Under LaTeX output we embed the TeX run's own PDF directly. This skips the
+  -- converter round-trip and preserves vector fidelity and fonts.
+  if deliverable == 'pdf' then
+    return { intermediate = 'pdf', convert = false }
+  end
+  -- Only dvisvgm reads a DVI, and only when it is the converter that will
+  -- actually run: `svg-command` takes precedence over `svg-engine`, and its
+  -- `{input}` is documented as the intermediate PDF.
+  if svg_command then return { intermediate = 'pdf', convert = true } end
+  if svg_engine == 'dvisvgm' then return { intermediate = 'dvi', convert = true } end
+  return { intermediate = 'pdf', convert = true }
 end
 
 -- The bundled standalone template, used unless `tikz.tex-template` supplies
@@ -1160,7 +1171,7 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
     log = base_filename .. ".log",
   }
   local convert_cmd, convert_args = convert_command(conf, files)
-  if conf.image_format ~= 'pdf' and not check_dependency(convert_cmd) then
+  if conf.pipeline.convert and not check_dependency(convert_cmd) then
     return nil, convert_cmd .. " not found. Install it (it is the configured " ..
       "SVG converter), or set tikz.svg-engine / tikz.svg-command to one you " ..
       "do have."
@@ -1181,9 +1192,9 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
       env.TEXINPUTS = conf.texinputs
       -- Ask for DVI only when the converter we are actually going to run
       -- consumes one; every other path reads the default PDF output. See
-      -- `intermediate_format`.
+      -- `pipeline_for`.
       local latex_args = { '-interaction=nonstopmode' }
-      if conf.intermediate == 'dvi' then
+      if conf.pipeline.intermediate == 'dvi' then
         table.insert(latex_args, '-output-format=dvi')
       end
       table.insert(latex_args, files.tex)
@@ -1198,16 +1209,17 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
           (read_file(files.log) or "") .. "\nTikZ Code:\n" .. code
       end
 
-      -- For PDF output, embed the intermediate PDF directly — no SVG
-      -- conversion needed. This skips the Inkscape rasterization round-trip
-      -- and preserves vector fidelity / fonts in the rendered PDF.
-      if conf.image_format == 'pdf' then
-        local imgdata = read_file(files.pdf)
+      -- Nothing to convert: the intermediate the TeX run produced is what we
+      -- deliver. Reading `pipeline.intermediate` rather than assuming a PDF is
+      -- what keeps this in step with what the TeX run was actually asked for.
+      if not conf.pipeline.convert then
+        local produced = files[conf.pipeline.intermediate]
+        local imgdata = read_file(produced)
         if not imgdata then
-          return nil, "Failed to read generated PDF file for TikZ figure '" ..
+          return nil, "Failed to read " .. produced .. " for TikZ figure '" ..
             base_filename .. "'.\nTikZ Code:\n" .. code
         end
-        return imgdata, 'application/pdf'
+        return imgdata, mime_for_format(conf.pipeline.intermediate)
       end
 
       -- Convert TeX output to SVG with the command chosen above.
@@ -1549,7 +1561,6 @@ local function configure (meta)
     end
   end
 
-  conf.intermediate = intermediate_format(conf['svg-engine'], conf['svg-command'])
   -- Setting both is a configuration mistake rather than a layered override, so
   -- say which one is being ignored instead of silently picking. Tested against
   -- `raw`, not `conf`: the latter always carries the svg-engine default.
@@ -1575,6 +1586,9 @@ local function configure (meta)
   -- under LaTeX, an SVG everywhere else. Doubles as the file extension.
   conf.image_format = conf.host_is_latex and 'pdf' or 'svg'
 
+  conf.pipeline = pipeline_for(conf.image_format, conf['svg-engine'],
+    conf['svg-command'])
+
   conf.texinputs = build_texinputs()
   return conf
 end
@@ -1599,7 +1613,7 @@ TIKZ_TEST = {
   build_tex_document = build_tex_document,
   as_figure = as_figure,
   cache_filename = cache_filename,
-  intermediate_format = intermediate_format,
+  pipeline_for = pipeline_for,
   check_dependency = check_dependency,
   find_executable = find_executable,
   resolve_axes = resolve_axes,

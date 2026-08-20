@@ -28,6 +28,7 @@ local PIC = '\\begin{tikzpicture}\\draw (0,0);\\end{tikzpicture}'
 
 local data, msg = compile(PIC, {}, {
   ['tex-engine'] = 'tikz-no-such-tex-engine', image_format = 'svg',
+  pipeline = {intermediate = 'pdf', convert = true},
 }, 'demo')
 check('missing tex engine returns no data', data, nil)
 check('missing tex engine explains itself',
@@ -39,6 +40,7 @@ check('missing tex engine names the engine',
 data, msg = compile(PIC, {}, {
   ['tex-engine'] = 'sh', image_format = 'svg',
   ['svg-command'] = {'tikz-no-such-converter', '{input}', '{output}'},
+  pipeline = {intermediate = 'pdf', convert = true},
 }, 'demo')
 check('missing svg converter returns no data', data, nil)
 check('missing svg converter names the command',
@@ -48,6 +50,7 @@ check('missing svg converter names the command',
 data, msg = compile(PIC, {}, {
   ['tex-engine'] = 'tikz-no-such-tex-engine', image_format = 'pdf',
   ['svg-command'] = {'tikz-no-such-converter'},
+  pipeline = {intermediate = 'pdf', convert = false},
 }, 'demo')
 check('pdf output does not require the svg converter',
   msg and msg:find('tikz-no-such-tex-engine', 1, true) ~= nil, true)
@@ -85,17 +88,31 @@ check('a percent in the filename survives substitution',
                 {pdf = '100%.pdf', dvi = 'd.dvi', svg = 'd.svg'})))[1],
   '100%.pdf')
 
--- Which intermediate file the TeX run must leave behind. `svg-command`
--- overrides `svg-engine` at conversion time and its {input} names the PDF, so
--- setting both used to produce a DVI and then look for a PDF that was never
--- written — a missing-file error naming neither cause.
-local I = TIKZ_TEST.intermediate_format
-check('inkscape reads the pdf', I('inkscape', nil), 'pdf')
-check('pdftocairo reads the pdf', I('pdftocairo', nil), 'pdf')
-check('dvisvgm reads the dvi', I('dvisvgm', nil), 'dvi')
-check('a custom command reads the pdf', I('inkscape', {'pdf2svg'}), 'pdf')
+-- The shape of one render: what the TeX run must leave behind, and whether a
+-- converter runs over it. Two decisions that used to be taken separately from
+-- overlapping inputs, and could contradict each other.
+local P = TIKZ_TEST.pipeline_for
+check('inkscape reads the pdf', P('svg', 'inkscape', nil).intermediate, 'pdf')
+check('pdftocairo reads the pdf', P('svg', 'pdftocairo', nil).intermediate, 'pdf')
+check('dvisvgm reads the dvi', P('svg', 'dvisvgm', nil).intermediate, 'dvi')
+-- `svg-command` overrides `svg-engine` at conversion time and its {input}
+-- names the PDF, so setting both must not ask for a DVI.
+check('a custom command reads the pdf',
+  P('svg', 'inkscape', {'pdf2svg'}).intermediate, 'pdf')
 check('a custom command reads the pdf even under dvisvgm',
-  I('dvisvgm', {'pdf2svg', '{input}', '{output}'}), 'pdf')
+  P('svg', 'dvisvgm', {'pdf2svg', '{input}', '{output}'}).intermediate, 'pdf')
+check('an svg deliverable is converted', P('svg', 'inkscape', nil).convert, true)
+
+-- The regression: under LaTeX output the intermediate IS the deliverable and
+-- no converter runs, so `svg-engine` must not drag the TeX run to DVI. It did,
+-- and every diagram in a `format: pdf` document with `svg-engine: dvisvgm`
+-- failed reading a PDF that was never written.
+check('pdf output never asks for a dvi',
+  P('pdf', 'dvisvgm', nil).intermediate, 'pdf')
+check('…and runs no converter', P('pdf', 'dvisvgm', nil).convert, false)
+check('pdf output with a custom command runs no converter either',
+  P('pdf', 'inkscape', {'pdf2svg'}).convert, false)
+check('pdf output embeds the pdf', P('pdf', 'inkscape', nil).intermediate, 'pdf')
 
 -- The dependency probe searches PATH itself. It used to ask a shell
 -- (`command -v`), which put a metadata-controlled string inside a shell
