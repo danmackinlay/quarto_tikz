@@ -24,6 +24,10 @@ local function read_file (filepath)
 end
 
 local function write_file (filepath, content)
+  -- Refuse a nil payload rather than letting `fh:write` raise. Writing
+  -- nothing is always the wrong thing to do and the traceback it produced
+  -- aborted the whole render (#30).
+  if content == nil then return false end
   local fh = io.open(filepath, 'wb')
   if not fh then return false end
   fh:write(content)
@@ -645,14 +649,32 @@ local function embed_tikzjax(code, user_opts, conf)
     '<script type="text/tikz">\n' .. body .. '\n</script>')
 end
 
--- Function to compile TikZ code to either SVG (default) or PDF (passthrough,
--- used when the Quarto output format is PDF).
+-- Compile TikZ code to either SVG (default) or PDF (passthrough, used when
+-- the Quarto output format is PDF).
+--
+-- Returns `imgdata, mimetype` on success and `nil, message` on failure. It
+-- deliberately does not use `error()` for expected failures — a missing TeX
+-- engine, a LaTeX run that did not produce a file. Under Quarto, `error()`
+-- inside a filter is intercepted: the message is logged but execution
+-- *continues to the next statement*, and a surrounding `pcall` reports
+-- success. Verified on Quarto 1.10.18 with an eight-line filter:
+--
+--     error('boom')                      --> logs "ERROR (…) boom", continues
+--     pcall(function() error('boom') end) --> true, nil
+--
+-- So every `error()` here used to be a log-and-carry-on that left the rest of
+-- the pipeline running against a file that was never produced: one missing
+-- engine emitted four errors, then handed `nil` to the cache writer, whose
+-- genuine runtime error (`fh:write(nil)`) *did* propagate and took the entire
+-- render down. Returning failures makes the control flow independent of the
+-- host's error semantics, which is what we want regardless of which way
+-- Quarto jumps in future. (#30)
 local function compile_tikz_to_svg(code, user_opts, conf, basename)  -- Added conf and basename parameters
   -- Ensure required dependencies are available
   if not check_dependency(conf.tex_engine) then
-    error(conf.tex_engine .. " not found on PATH. Install it, or set " ..
+    return nil, conf.tex_engine .. " not found on PATH. Install it, or set " ..
       "tikz.tex-engine to a TeX engine you do have (pdflatex, lualatex, " ..
-      "xelatex, …).")
+      "xelatex, …)."
   end
   -- The svg converter is only needed when we actually convert to SVG. For
   -- PDF output we embed the intermediate PDF directly and nothing here is
@@ -661,7 +683,7 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)  -- Added co
   if conf.output_format ~= 'pdf' then
     local svg_cmd = conf.svg_command and conf.svg_command[1] or conf.svg_engine
     if not check_dependency(svg_cmd) then
-      error(svg_cmd .. " not found. Please install it (the configured svg converter) to convert TeX output to SVG.")
+      return nil, svg_cmd .. " not found. Please install it (the configured svg converter) to convert TeX output to SVG."
     end
   end
 
@@ -729,9 +751,9 @@ $body$
       if not success then
         local log_file = base_filename .. ".log"
         local log_content = read_file(log_file) or ""
-        error("Error compiling TikZ figure '" .. base_filename .. "':\n" ..
+        return nil, "Error compiling TikZ figure '" .. base_filename .. "':\n" ..
           tostring(latex_result) .. "\nLaTeX Log:\n" .. log_content ..
-          "\nTikZ Code:\n" .. code)
+          "\nTikZ Code:\n" .. code
       end
 
       -- For PDF output, embed the intermediate PDF directly — no SVG
@@ -740,7 +762,8 @@ $body$
       if conf.output_format == 'pdf' then
         local imgdata = read_file(pdf_file)
         if not imgdata then
-          error("Failed to read generated PDF file for TikZ figure '" .. base_filename .. "'.\nTikZ Code:\n" .. code)
+          return nil, "Failed to read generated PDF file for TikZ figure '" ..
+            base_filename .. "'.\nTikZ Code:\n" .. code
         end
         return imgdata, 'application/pdf'
       end
@@ -799,14 +822,16 @@ $body$
         pandoc.pipe, convert_cmd, convert_args, ''
       )
       if not success_convert then
-        error("Error converting to SVG (command: " .. convert_cmd .. ") for TikZ figure '" .. base_filename .. "':\n" ..
-          tostring(convert_result) .. "\nTikZ Code:\n" .. code)
+        return nil, "Error converting to SVG (command: " .. convert_cmd ..
+          ") for TikZ figure '" .. base_filename .. "':\n" ..
+          tostring(convert_result) .. "\nTikZ Code:\n" .. code
       end
 
       -- Read the SVG file
       local imgdata = read_file(svg_file)
       if not imgdata then
-        error("Failed to read generated SVG file for TikZ figure '" .. base_filename .. "'.\nTikZ Code:\n" .. code)
+        return nil, "Failed to read generated SVG file for TikZ figure '" ..
+          base_filename .. "'.\nTikZ Code:\n" .. code
       end
       return imgdata, 'image/svg+xml'
     end)
@@ -959,17 +984,39 @@ local function code_to_figure(conf)
     end
 
     if not imgdata or not imgtype then
-      -- No cached image; compile TikZ code
-      local success, result, mime = pcall(function()
+      -- No cached image; compile TikZ code. Two failure channels, because
+      -- they mean different things and only one of them is under our
+      -- control:
+      --
+      --   * `compile_tikz_to_svg` returns `nil, message` for an expected
+      --     failure — a missing engine, a LaTeX run that produced no file.
+      --   * `pcall` still guards against a genuine runtime error in the
+      --     filter itself, which (unlike `error()`, see the note on
+      --     compile_tikz_to_svg) really does propagate under Quarto.
+      --
+      -- Either way one diagram must not take down the render: log it once,
+      -- leave the block as its source, and let the rest of the document
+      -- through. On a build host without TeX that turns a failed publish
+      -- into a cosmetic gap. (#30)
+      local ok, result, extra = pcall(function()
         return compile_tikz_to_svg(block.text, dgr_opt.opt, conf, basename) -- Pass conf and basename
       end)
-      if not success then
-        quarto.log.error("Error compiling TikZ figure '" .. basename .. "': " .. tostring(result))
+      local failure
+      if not ok then
+        failure = tostring(result)
+      elseif not result then
+        failure = extra or "no image data was produced"
+      end
+      if failure then
+        quarto.log.error(
+          "tikz: could not render figure '" .. basename .. "', leaving the " ..
+          "block unrendered.\n" .. failure
+        )
         return nil -- Return the original block unchanged
       end
       -- pcall returns (true, returned_values...) on success; result is the
-      -- imgdata, mime is the MIME string returned by compile_tikz_to_svg.
-      imgdata, imgtype = result, mime or mime_for_format(out_format)
+      -- imgdata, extra is the MIME string returned by compile_tikz_to_svg.
+      imgdata, imgtype = result, extra or mime_for_format(out_format)
 
       -- Cache the image
       cache_image(basename, hash, dgr_opt.opt, imgdata, out_format)
@@ -1202,6 +1249,8 @@ end
 -- there and silently drops the whole filter if it finds anything else.
 TIKZ_TEST = {
   canonical_options = canonical_options,
+  compile_tikz_to_svg = compile_tikz_to_svg,
+  write_file = write_file,
   hashable_code = hashable_code,
   code_part = code_part,
   match_loader_line = match_loader_line,
