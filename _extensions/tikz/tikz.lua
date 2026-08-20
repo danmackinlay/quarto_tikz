@@ -533,16 +533,27 @@ local function canonical_options(options)
   return table.concat(parts, ',')
 end
 
-local function cache_filename(basename, hash, options, format)
-  local cache_key = pandoc.sha1(
-    #hash .. ':' .. hash .. canonical_options(options)
-  )
-  local short = cache_key:sub(1, 8)
+-- The name every artifact of one diagram shares, extension aside: its cache
+-- entry, its mediabag entry, and its `save-tex` directory.
+--
+-- One function because those three used to be named three ways. Only the cache
+-- folded the options into the name; the mediabag and the `save-tex` directory
+-- used the bare basename. Two blocks with identical TikZ and different options
+-- — `additionalPackages` differing, say — therefore wrote two correct cache
+-- entries and then collapsed onto one mediabag file, so the block rendered
+-- first displayed the other block's diagram. Two blocks sharing an explicit
+-- `%%| filename:` collided the same way, whatever their code.
+local function artifact_name(basename, hash, options)
+  local key = pandoc.sha1(#hash .. ':' .. hash .. canonical_options(options))
   local label = basename or 'tikz'
   if #label == 40 and label:match('^[0-9a-f]+$') then
     label = 'tikz'
   end
-  return label .. '.' .. short .. '.' .. format
+  return label .. '.' .. key:sub(1, 8)
+end
+
+local function artifact_file(basename, hash, options, format)
+  return artifact_name(basename, hash, options) .. '.' .. format
 end
 
 -- Where a given diagram's cached file lives, or nil when caching is off.
@@ -553,7 +564,7 @@ end
 local function cache_path(dir, basename, hash, options, format)
   if not dir then return nil end
   return pandoc.path.join {
-    dir, cache_filename(basename, hash, options, format),
+    dir, artifact_file(basename, hash, options, format),
   }
 end
 
@@ -1152,7 +1163,7 @@ end
 -- render down. Returning failures makes the control flow independent of the
 -- host's error semantics, which is what we want regardless of which way
 -- Quarto jumps in future. (#30)
-local function compile_tikz_to_svg(code, user_opts, conf, basename)
+local function compile_tikz_to_svg(code, user_opts, conf, name)
   -- Ensure required dependencies are available
   if not check_dependency(conf['tex-engine']) then
     return nil, conf['tex-engine'] .. " not found. Install it, or set " ..
@@ -1162,13 +1173,12 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
   -- The svg converter is only needed when we actually convert to SVG. For
   -- PDF output we embed the intermediate PDF directly and nothing here is
   -- invoked.
-  local base_filename = basename or "tikz-image"
   local files = {
-    tex = base_filename .. ".tex",
-    pdf = base_filename .. ".pdf",
-    svg = base_filename .. ".svg",
-    dvi = base_filename .. ".dvi",
-    log = base_filename .. ".log",
+    tex = name .. ".tex",
+    pdf = name .. ".pdf",
+    svg = name .. ".svg",
+    dvi = name .. ".dvi",
+    log = name .. ".log",
   }
   local convert_cmd, convert_args = convert_command(conf, files)
   if conf.pipeline.convert and not check_dependency(convert_cmd) then
@@ -1204,7 +1214,7 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
         end)
       end)
       if not success then
-        return nil, "Error compiling TikZ figure '" .. base_filename .. "':\n" ..
+        return nil, "Error compiling TikZ figure '" .. name .. "':\n" ..
           tostring(latex_result) .. "\nLaTeX Log:\n" ..
           (read_file(files.log) or "") .. "\nTikZ Code:\n" .. code
       end
@@ -1217,7 +1227,7 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
         local imgdata = read_file(produced)
         if not imgdata then
           return nil, "Failed to read " .. produced .. " for TikZ figure '" ..
-            base_filename .. "'.\nTikZ Code:\n" .. code
+            name .. "'.\nTikZ Code:\n" .. code
         end
         return imgdata, mime_for_format(conf.pipeline.intermediate)
       end
@@ -1228,7 +1238,7 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
       )
       if not success_convert then
         return nil, "Error converting to SVG (command: " .. convert_cmd ..
-          ") for TikZ figure '" .. base_filename .. "':\n" ..
+          ") for TikZ figure '" .. name .. "':\n" ..
           tostring(convert_result) .. "\nTikZ Code:\n" .. code
       end
 
@@ -1236,17 +1246,17 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
       local imgdata = read_file(files.svg)
       if not imgdata then
         return nil, "Failed to read generated SVG file for TikZ figure '" ..
-          base_filename .. "'.\nTikZ Code:\n" .. code
+          name .. "'.\nTikZ Code:\n" .. code
       end
       return imgdata, 'image/svg+xml'
     end)
   end
 
   if conf['save-tex'] then
-    local dir = conf['tex-dir']
-    -- Use the basename or hash to create a subdirectory
-    local subdir_name = basename or pandoc.sha1(code)
-    local diagram_dir = pandoc.path.join { dir, subdir_name }
+    -- One subdirectory per diagram, under the same name as everything else
+    -- it produces — so two blocks sharing a `%%| filename:` no longer
+    -- overwrite each other's intermediates.
+    local diagram_dir = pandoc.path.join { conf['tex-dir'], name }
     pandoc.system.make_directory(diagram_dir, true)
     return process_in_dir(diagram_dir)
   else
@@ -1377,6 +1387,11 @@ local function code_to_figure(conf)
     -- cache key, so the two cannot drift apart.
     local hash = code
     local basename = dgr_opt.filename or pandoc.sha1(hash)
+    -- One name for every artifact this diagram produces: its cache entry, the
+    -- file handed to the mediabag, the `save-tex` directory, and whatever the
+    -- diagnostics below name. Derived from the code *and* the options, so two
+    -- blocks that differ only in their options no longer share a file.
+    local name = artifact_name(basename, hash, key_opts)
 
     -- Check if image is cached
     local imgdata, imgtype = nil, nil
@@ -1400,7 +1415,7 @@ local function code_to_figure(conf)
       -- through. On a build host without TeX that turns a failed publish
       -- into a cosmetic gap. (#30)
       local ok, result, extra = pcall(function()
-        return compile_tikz_to_svg(code, compile_opts, conf, basename)
+        return compile_tikz_to_svg(code, compile_opts, conf, name)
       end)
       local failure
       if not ok then
@@ -1410,7 +1425,7 @@ local function code_to_figure(conf)
       end
       if failure then
         log.error(
-          "tikz: could not render figure '" .. basename .. "', leaving the " ..
+          "tikz: could not render figure '" .. name .. "', leaving the " ..
           "block unrendered.\n" .. failure
         )
         return nil -- Return the original block unchanged
@@ -1439,13 +1454,12 @@ local function code_to_figure(conf)
         return as_figure(pandoc.RawBlock('html', markup), dgr_opt)
       end
       log.warning(
-        "tikz: could not inline figure '" .. basename .. "' (no <svg> root " ..
+        "tikz: could not inline figure '" .. name .. "' (no <svg> root " ..
         "in the converter's output); falling back to an <img> reference."
       )
     end
 
-    -- Use the block's filename attribute or create a new name by hashing the image content.
-    local fname = basename .. '.' .. image_format
+    local fname = name .. '.' .. image_format
 
     -- Store the data in the mediabag:
     pandoc.mediabag.insert(fname, imgtype, imgdata)
@@ -1612,7 +1626,8 @@ TIKZ_TEST = {
   convert_command = convert_command,
   build_tex_document = build_tex_document,
   as_figure = as_figure,
-  cache_filename = cache_filename,
+  artifact_name = artifact_name,
+  artifact_file = artifact_file,
   pipeline_for = pipeline_for,
   check_dependency = check_dependency,
   find_executable = find_executable,

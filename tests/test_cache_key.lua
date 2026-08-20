@@ -196,4 +196,39 @@ check('embed values are declared once',
 check('svg-engine values are declared once',
   table.concat(OPTS['svg-engine'].values, ', '), 'inkscape, dvisvgm, pdftocairo')
 
+
+-- The artifact name: one name for a diagram's cache entry, its mediabag file
+-- and its `save-tex` directory. Only the cache used to fold the options in;
+-- the other two used the bare basename, so two blocks with identical TikZ and
+-- different options wrote two correct cache entries and then collapsed onto
+-- one mediabag file — the first block displaying the second one's diagram.
+local AN, AF = TIKZ_TEST.artifact_name, TIKZ_TEST.artifact_file
+local CODE = '\\begin{tikzpicture}\\draw (0,0);\\end{tikzpicture}'
+
+check('the same code and options give the same name',
+  AN('d', CODE, {a = '1'}), AN('d', CODE, {a = '1'}))
+check('different options give different names',
+  AN('d', CODE, {a = '1'}) ~= AN('d', CODE, {a = '2'}), true)
+check('different code gives different names',
+  AN('d', CODE, {}) ~= AN('d', CODE .. '\\relax', {}), true)
+-- The collision as it actually appeared: same code, same explicit filename,
+-- different `additionalPackages`.
+check('a shared filename does not collide when the options differ',
+  AN('shared', CODE, {['additional-packages'] = '\\usepackage{a}'}) ~=
+  AN('shared', CODE, {['additional-packages'] = '\\usepackage{b}'}), true)
+
+check('the basename is the label', AN('my-diagram', CODE, {}):match('^[^.]+'),
+  'my-diagram')
+check('an auto-generated sha1 basename becomes a short literal label',
+  AN(pandoc.sha1(CODE), CODE, {}):match('^[^.]+'), 'tikz')
+check('a missing basename becomes the same label',
+  AN(nil, CODE, {}):match('^[^.]+'), 'tikz')
+check('the hash is eight characters',
+  #(AN('d', CODE, {}):match('%.(.+)$')), 8)
+
+check('artifact_file appends the extension',
+  AF('d', CODE, {}, 'svg'), AN('d', CODE, {}) .. '.svg')
+check('the formats differ only by extension',
+  AF('d', CODE, {}, 'pdf'):gsub('pdf$', 'svg'), AF('d', CODE, {}, 'svg'))
+
 t.done()
