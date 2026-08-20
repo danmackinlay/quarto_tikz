@@ -3,7 +3,7 @@
 -- No dependencies beyond pandoc, which the extension already requires.
 
 dofile('_extensions/tikz/tikz.lua')
-local T = TIKZ_PASSTHROUGH_TEST
+local T = TIKZ_TEST
 local failures, checks = 0, 0
 
 local function check(label, got, want)
