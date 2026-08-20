@@ -157,7 +157,6 @@ local function cachedir ()
   return cache_dir
 end
 
-local image_cache = nil  -- Path holding the image cache, or `nil` if the cache is not used.
 local tikzjax_assets_injected = false  -- Guards once-per-document injection of TikZJax JS/CSS.
 
 -- Function to parse properties from code comments
@@ -395,31 +394,30 @@ local function cache_filename(basename, hash, options, format)
   return label .. '.' .. short .. '.' .. format
 end
 
--- Function to get cached image
-local function get_cached_image (basename, hash, options, format)
-  if not image_cache then
-    return nil
-  end
-  local imgpath = pandoc.path.join {
-    image_cache, cache_filename(basename, hash, options, format),
+-- Where a given diagram's cached file lives, or nil when caching is off.
+--
+-- `dir` is passed in rather than read from an upvalue: the cache directory
+-- used to live in a module-level `image_cache` *and* be copied into `conf`,
+-- so there were two places to look and only one of them was ever read.
+local function cache_path(dir, basename, hash, options, format)
+  if not dir then return nil end
+  return pandoc.path.join {
+    dir, cache_filename(basename, hash, options, format),
   }
-  local imgdata = read_file(imgpath)
+end
+
+local function get_cached_image(dir, basename, hash, options, format)
+  local path = cache_path(dir, basename, hash, options, format)
+  local imgdata = path and read_file(path)
   if imgdata then
     return imgdata, mime_for_format(format)
   end
   return nil
 end
 
--- Function to cache image
-local function cache_image (basename, hash, options, imgdata, format)
-  -- Do nothing if caching is disabled or not possible.
-  if not image_cache then
-    return
-  end
-  local imgpath = pandoc.path.join {
-    image_cache, cache_filename(basename, hash, options, format),
-  }
-  write_file(imgpath, imgdata)
+local function cache_image(dir, basename, hash, options, imgdata, format)
+  local path = cache_path(dir, basename, hash, options, format)
+  if path then write_file(path, imgdata) end
 end
 
 -- Preamble text hoisted by the latex-passthrough renderer, kept in three
@@ -705,6 +703,15 @@ local function prepare_passthrough_body(code)
   return preamble, table.concat(body, '\n'), warns
 end
 
+-- The two option values every renderer prepends to its LaTeX. Stringified
+-- because a `%%|` directive always arrives as text while document metadata
+-- arrives as Inlines, and absent because "unset" and "empty" mean the same
+-- thing here.
+local function preamble_parts(user_opts)
+  return stringify(user_opts['additional-packages'] or ''),
+    stringify(user_opts['header-includes'] or '')
+end
+
 -- LaTeX passthrough: hand the TikZ source to the host document as raw LaTeX
 -- instead of compiling it to a PDF and embedding the result. The diagram is
 -- then typeset by the same LaTeX run as the surrounding text, which matches
@@ -716,9 +723,10 @@ end
 -- load it), the block's `additionalPackages` / `header-includes`, and the
 -- `\usetikzlibrary` calls written in the body.
 local function embed_latex_passthrough(code, user_opts, basename)
+  local additional, headers = preamble_parts(user_opts)
   hoist(PASSTHROUGH_PACKAGES, '\\usepackage{tikz}')
-  hoist(PASSTHROUGH_PACKAGES, stringify(user_opts['additional-packages'] or ''))
-  hoist(PASSTHROUGH_HEADERS, stringify(user_opts['header-includes'] or ''))
+  hoist(PASSTHROUGH_PACKAGES, additional)
+  hoist(PASSTHROUGH_HEADERS, headers)
   local preamble, body, warns = prepare_passthrough_body(code)
   for _, text in ipairs(preamble) do
     hoist(PASSTHROUGH_LIBRARIES, text)
@@ -756,15 +764,10 @@ end
 -- works under either renderer.
 local function embed_tikzjax(code, user_opts, conf)
   inject_tikzjax_assets(conf)
+  local additional, headers = preamble_parts(user_opts)
   local prelude_parts = {}
-  local additional = stringify(user_opts['additional-packages'] or '')
-  if additional ~= '' then
-    table.insert(prelude_parts, additional)
-  end
-  local headers = stringify(user_opts['header-includes'] or '')
-  if headers ~= '' then
-    table.insert(prelude_parts, headers)
-  end
+  if additional ~= '' then table.insert(prelude_parts, additional) end
+  if headers ~= '' then table.insert(prelude_parts, headers) end
   local prelude = table.concat(prelude_parts, '\n')
   local body = (prelude ~= '' and (prelude .. '\n') or '') ..
     '\\begin{document}\n' .. code .. '\n\\end{document}'
@@ -907,6 +910,22 @@ local function intermediate_format(svg_engine, svg_command)
   return 'pdf'
 end
 
+-- How every renderer finishes: a captioned block becomes a `pandoc.Figure`
+-- so that `%%| caption:` and `fig-attr` behave identically whichever renderer
+-- drew it, and an uncaptioned one is emitted bare — no float, no centring,
+-- placement left to the caller.
+--
+-- The only thing that differed between the four copies of this was whether
+-- the content was already a Block. Three renderers produce a `RawBlock`,
+-- which `Figure` takes directly; the `<img>` path produces an `Image`, which
+-- is an Inline and needs a `Plain` around it. That is now handled here rather
+-- than restated at each return.
+local function as_figure(content, dgr_opt)
+  local block = content.t == 'Image' and pandoc.Plain { content } or content
+  if not dgr_opt.caption then return block end
+  return pandoc.Figure({ block }, dgr_opt.caption, dgr_opt['fig-attr'])
+end
+
 -- Compile TikZ code to either SVG (default) or PDF (passthrough, used when
 -- the Quarto output format is PDF).
 --
@@ -970,15 +989,10 @@ $endfor$
 $body$
 \end{document}
       ]])
+      local additional, headers = preamble_parts(user_opts)
       local meta = {
-        ['header-includes'] = { pandoc.RawInline(
-          'latex',
-          stringify(user_opts['header-includes'] or '')
-        ) },
-        ['additional-packages'] = { pandoc.RawInline(
-          'latex',
-          stringify(user_opts['additional-packages'] or '')
-        ) },
+        ['header-includes'] = { pandoc.RawInline('latex', headers) },
+        ['additional-packages'] = { pandoc.RawInline('latex', additional) },
       }
       local tex_code = pandoc.write(
         pandoc.Pandoc({ pandoc.RawBlock('latex', code) }, meta),
@@ -1227,18 +1241,7 @@ local function code_to_figure(conf)
         block.text, compile_opts,
         dgr_opt.filename or blank_to_nil(dgr_opt['fig-attr'].id) or '<unnamed>'
       )
-      -- A captioned block still becomes a pandoc.Figure, exactly as on the
-      -- other two paths, so `%%| caption:` and `fig-attr` behave the same
-      -- whichever renderer is in force; pandoc wraps it in a `figure`
-      -- environment with a `\caption`. An uncaptioned block is emitted bare,
-      -- with no float and no centring, leaving placement to the caller.
-      return dgr_opt.caption and
-          pandoc.Figure(
-            { raw },
-            dgr_opt.caption,
-            dgr_opt['fig-attr']
-          ) or
-          raw
+      return as_figure(raw, dgr_opt)
     end
 
     -- TikZJax path: emit a <script type="text/tikz"> block for the reader's
@@ -1254,16 +1257,7 @@ local function code_to_figure(conf)
         )
         return {}  -- remove the block from the output entirely
       end
-      local raw = embed_tikzjax(block.text, compile_opts, conf)
-      -- Figure content takes a list of Blocks; RawBlock plugs in directly
-      -- (unlike the LaTeX path's Image, which is an Inline that needs Plain).
-      return dgr_opt.caption and
-          pandoc.Figure(
-            { raw },
-            dgr_opt.caption,
-            dgr_opt['fig-attr']
-          ) or
-          raw
+      return as_figure(embed_tikzjax(block.text, compile_opts, conf), dgr_opt)
     end
 
     -- The block text as it matters to the compiler: the basis for both the
@@ -1274,9 +1268,8 @@ local function code_to_figure(conf)
     -- Check if image is cached
     local imgdata, imgtype = nil, nil
     local out_format = conf.output_format
-    if conf.cache then
-      imgdata, imgtype = get_cached_image(basename, hash, key_opts, out_format)
-    end
+    imgdata, imgtype = get_cached_image(
+      conf.image_cache, basename, hash, key_opts, out_format)
 
     if not imgdata or not imgtype then
       -- No cached image; compile TikZ code. Two failure channels, because
@@ -1314,7 +1307,7 @@ local function code_to_figure(conf)
       imgdata, imgtype = result, extra or mime_for_format(out_format)
 
       -- Cache the image
-      cache_image(basename, hash, key_opts, imgdata, out_format)
+      cache_image(conf.image_cache, basename, hash, key_opts, imgdata, out_format)
     end
 
     -- Inline embedding: hand the SVG to the page as markup instead of
@@ -1330,12 +1323,7 @@ local function code_to_figure(conf)
       inline_svg_seq = inline_svg_seq + 1
       local markup = namespace_svg(imgdata, 'tikz' .. inline_svg_seq, dgr_opt.alt)
       if markup then
-        local raw = pandoc.RawBlock('html', markup)
-        -- Figure takes Blocks, so a RawBlock plugs in directly — unlike the
-        -- Image below, which is an Inline and needs a Plain.
-        return dgr_opt.caption and
-            pandoc.Figure({ raw }, dgr_opt.caption, dgr_opt['fig-attr']) or
-            raw
+        return as_figure(pandoc.RawBlock('html', markup), dgr_opt)
       end
       log.warning(
         "tikz: could not inline figure '" .. basename .. "' (no <svg> root " ..
@@ -1349,17 +1337,8 @@ local function code_to_figure(conf)
     -- Store the data in the mediabag:
     pandoc.mediabag.insert(fname, imgtype, imgdata)
 
-    -- Create the image object.
-    local image = pandoc.Image(dgr_opt.alt, fname, "", dgr_opt['image-attr'])
-
-    -- Create a figure if the diagram has a caption; otherwise return just the image.
-    return dgr_opt.caption and
-        pandoc.Figure(
-          pandoc.Plain { image },
-          dgr_opt.caption,
-          dgr_opt['fig-attr']
-        ) or
-        pandoc.Plain { image }
+    return as_figure(
+      pandoc.Image(dgr_opt.alt, fname, "", dgr_opt['image-attr']), dgr_opt)
   end
 end
 
@@ -1414,6 +1393,7 @@ local function configure (meta)
   meta.tikz = nil  -- Remove tikz metadata to avoid processing it further
 
   -- cache for image files
+  local image_cache = nil
   if conf.cache == true then
     image_cache = conf['cache-dir']
       and stringify(conf['cache-dir'])
@@ -1421,8 +1401,6 @@ local function configure (meta)
     if image_cache then
       pandoc.system.make_directory(image_cache, true)
     end
-  else
-    image_cache = nil
   end
 
   -- Handle save-tex option
@@ -1568,7 +1546,6 @@ local function configure (meta)
   tikzjax_url = tikzjax_url:gsub('/+$', '')
 
   return {
-    cache = image_cache and true,
     image_cache = image_cache,
     save_tex = save_tex,
     tex_dir = tex_dir,
@@ -1597,6 +1574,8 @@ TIKZ_TEST = {
   hashable_code = hashable_code,
   code_part = code_part,
   match_loader_line = match_loader_line,
+  as_figure = as_figure,
+  cache_filename = cache_filename,
   intermediate_format = intermediate_format,
   check_dependency = check_dependency,
   find_executable = find_executable,
