@@ -684,6 +684,10 @@ The options choosing *which* binary runs — `tikz.tex-engine`,
 document/project metadata, never from per-block attributes or `%%|`
 directives, so a hostile diagram *body* alone can't run a command.
 
+Those programs are launched directly (`pandoc.pipe`), never through a
+shell, so a value like `svg-engine: "x; rm -rf ~"` names a program that
+does not exist rather than a pipeline that runs.
+
 **Don't render untrusted documents.** Metadata is trusted input: an
 attacker controlling the YAML front-matter can point `svg-command` at
 any program. Separately, TeX can shell out via `\write18` if

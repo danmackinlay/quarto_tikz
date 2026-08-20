@@ -75,12 +75,66 @@ local function include_in_header(text, what)
   return false
 end
 
--- Function to check if a command exists
+-- Whether `cmd` names something we could run, answered by searching PATH
+-- ourselves and memoized for the render.
+--
+-- The check is worth keeping rather than folding into the first
+-- `pandoc.pipe` failure, because it fails *fast*: on a machine that has TeX
+-- but not Inkscape, a project with fifty diagrams should report a missing
+-- converter fifty times without running LaTeX fifty times first.
+--
+-- What it replaces is `io.popen("command -v " .. cmd .. " 2>/dev/null")`,
+-- which had three problems:
+--
+--   * It interpolated a metadata-controlled string into a shell command, so
+--     `tex-engine` could name a pipeline rather than a program. Everywhere
+--     else the filter runs external programs through `pandoc.pipe`, which
+--     execs directly with no shell in between.
+--   * `command -v` is a POSIX shell builtin. Under `cmd.exe` it is not a
+--     command at all, so the probe always came back empty and *every*
+--     Windows render reported "pdflatex not found on PATH" — despite the
+--     Windows handling in `cachedir` and `build_texinputs`.
+--   * It spawned a subprocess per diagram to answer a question whose answer
+--     cannot change during a render.
+local function readable(path)
+  local fh = io.open(path, 'rb')
+  if not fh then return false end
+  fh:close()
+  return true
+end
+
+local function find_executable(cmd)
+  -- A name containing a separator is a path, not something to look up. Same
+  -- rule a shell applies, and both separators are accepted because Windows
+  -- takes either.
+  if cmd:find('[/\\]') then return readable(cmd) end
+
+  -- On Windows an executable is found by appending one of PATHEXT; on
+  -- everything else the name is used as written.
+  local suffixes = { '' }
+  if pandoc.system.os == 'windows' then
+    local pathext = os.getenv('PATHEXT') or '.COM;.EXE;.BAT;.CMD'
+    for ext in pathext:gmatch('[^;]+') do
+      suffixes[#suffixes + 1] = ext:lower()
+    end
+  end
+
+  local sep = pandoc.path.search_path_separator
+  for dir in (os.getenv('PATH') or ''):gmatch('[^' .. sep .. ']+') do
+    for _, suffix in ipairs(suffixes) do
+      if readable(pandoc.path.join { dir, cmd .. suffix }) then return true end
+    end
+  end
+  return false
+end
+
+local executable_seen = {}
+
 local function check_dependency(cmd)
-  local handle = io.popen("command -v " .. cmd .. " 2>/dev/null")
-  local result = handle:read("*a")
-  handle:close()
-  return result ~= ""
+  if executable_seen[cmd] == nil then
+    executable_seen[cmd] = find_executable(cmd)
+  end
+  return executable_seen[cmd]
 end
 
 -- Returns a filter-specific directory in which cache files can be stored, or nil if not available.
@@ -829,10 +883,10 @@ end
 -- render down. Returning failures makes the control flow independent of the
 -- host's error semantics, which is what we want regardless of which way
 -- Quarto jumps in future. (#30)
-local function compile_tikz_to_svg(code, user_opts, conf, basename)  -- Added conf and basename parameters
+local function compile_tikz_to_svg(code, user_opts, conf, basename)
   -- Ensure required dependencies are available
   if not check_dependency(conf.tex_engine) then
-    return nil, conf.tex_engine .. " not found on PATH. Install it, or set " ..
+    return nil, conf.tex_engine .. " not found. Install it, or set " ..
       "tikz.tex-engine to a TeX engine you do have (pdflatex, lualatex, " ..
       "xelatex, …)."
   end
@@ -1475,6 +1529,8 @@ TIKZ_TEST = {
   hashable_code = hashable_code,
   code_part = code_part,
   match_loader_line = match_loader_line,
+  check_dependency = check_dependency,
+  find_executable = find_executable,
   resolve_axes = resolve_axes,
   normalize_renderer = normalize_renderer,
   normalize_embed = normalize_embed,

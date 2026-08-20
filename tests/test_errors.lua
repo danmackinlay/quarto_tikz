@@ -39,7 +39,7 @@ local data, msg = compile(PIC, {}, {
 }, 'demo')
 check('missing tex engine returns no data', data, nil)
 check('missing tex engine explains itself',
-  msg and msg:find('not found on PATH', 1, true) ~= nil, true)
+  msg and msg:find('not found', 1, true) ~= nil, true)
 check('missing tex engine names the engine',
   msg and msg:find('tikz-no-such-tex-engine', 1, true) ~= nil, true)
 
@@ -59,6 +59,29 @@ data, msg = compile(PIC, {}, {
 }, 'demo')
 check('pdf output does not require the svg converter',
   msg and msg:find('tikz-no-such-tex-engine', 1, true) ~= nil, true)
+
+-- The dependency probe searches PATH itself. It used to ask a shell
+-- (`command -v`), which put a metadata-controlled string inside a shell
+-- command and, because `command -v` is a POSIX builtin, reported every
+-- program as missing under cmd.exe.
+local F = TIKZ_TEST.find_executable
+check('finds something that is certainly on PATH', F('sh'), true)
+check('does not find something that is certainly not',
+  F('tikz-no-such-binary-anywhere'), false)
+-- An absolute path is taken at face value rather than looked up.
+check('an absolute path that exists', F('/bin/sh'), true)
+check('an absolute path that does not', F('/bin/tikz-no-such-binary'), false)
+-- A shell metacharacter is now just part of a name that does not exist,
+-- rather than something a shell would act on.
+check('a shell pipeline is not a program', F('sh; echo pwned'), false)
+check('a relative path with a separator is not looked up on PATH',
+  F('./sh'), false)
+-- The answer is memoized, so it must still be the same answer.
+check('memoized probe agrees', TIKZ_TEST.check_dependency('sh'), true)
+check('memoized probe agrees on a miss',
+  TIKZ_TEST.check_dependency('tikz-no-such-binary-anywhere'), false)
+check('memoized probe is stable across calls',
+  TIKZ_TEST.check_dependency('sh'), true)
 
 -- Diagnostics must survive the absence of Quarto. This suite runs under
 -- `pandoc lua`, where the `quarto` global does not exist, so every check
