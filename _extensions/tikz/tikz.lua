@@ -910,6 +910,87 @@ local function intermediate_format(svg_engine, svg_command)
   return 'pdf'
 end
 
+-- The bundled standalone template, used unless `tikz.tex-template` supplies
+-- one. The documentclass loads TikZ, so the block only has to add whatever
+-- the user asked for.
+local DEFAULT_TEX_TEMPLATE = [[
+\documentclass[tikz]{standalone}
+% \usepackage{tikz} % already loaded by the documentclass
+$additional-packages$
+$for(header-includes)$
+$it$
+$endfor$
+\begin{document}
+$body$
+\end{document}
+]]
+
+-- Render one block into a complete standalone LaTeX document.
+local function build_tex_document(code, user_opts, template_content)
+  local template = pandoc.template.compile(template_content or DEFAULT_TEX_TEMPLATE)
+  local additional, headers = preamble_parts(user_opts)
+  local meta = {
+    ['header-includes'] = { pandoc.RawInline('latex', headers) },
+    ['additional-packages'] = { pandoc.RawInline('latex', additional) },
+  }
+  return pandoc.write(
+    pandoc.Pandoc({ pandoc.RawBlock('latex', code) }, meta),
+    'latex',
+    { template = template }
+  )
+end
+
+-- The converter to run, and its arguments, for one diagram's intermediate
+-- files. Split out so the dispatch can be read — and tested — without a TeX
+-- installation; it is also where `svg-command` overriding `svg-engine` is
+-- decided, which is the pairing that used to disagree with the DVI request.
+--
+-- `files` carries the paths the TeX run produced or is expected to produce:
+-- `pdf`, `dvi`, `svg`.
+local function convert_command(conf, files)
+  if conf.svg_command then
+    -- Element 1 is the executable; the rest are its arguments, with
+    -- {input}/{output} substituted. rep_escape because these are gsub
+    -- *replacements*: a '%' in a user-supplied `filename` would otherwise be
+    -- read as a capture reference.
+    local args = {}
+    for i = 2, #conf.svg_command do
+      args[#args + 1] = conf.svg_command[i]
+        :gsub('{input}', rep_escape(files.pdf))
+        :gsub('{output}', rep_escape(files.svg))
+    end
+    return conf.svg_command[1], args
+  end
+
+  if conf.svg_engine == 'dvisvgm' then
+    -- dvisvgm reads DVI directly. --font-format=woff embeds fonts as WOFF
+    -- (instead of converting glyphs to paths), which keeps text selectable /
+    -- styleable in the rendered SVG — the thing `embed: inline` exists to
+    -- expose. Note: dvisvgm must be the TeX-Live-integrated build (e.g. via
+    -- tlmgr); standalone packages can fail to find the PostScript prologue
+    -- files.
+    return 'dvisvgm', { '--font-format=woff', '-o', files.svg, files.dvi }
+  end
+
+  if conf.svg_engine == 'pdftocairo' then
+    -- pdftocairo (poppler-utils) reads PDF and is widely available; a good
+    -- lightweight alternative to Inkscape where Inkscape isn't installed.
+    return 'pdftocairo', { '-svg', files.pdf, files.svg }
+  end
+
+  -- Inkscape default. Note: --pages=N (Inkscape 1.2+) is omitted because the
+  -- standalone class always produces a single-page PDF, and dropping it
+  -- preserves compatibility with Inkscape 1.0/1.1 (issue #4).
+  return 'inkscape', {
+    '--export-area-drawing',
+    '--export-type=svg',
+    '--export-plain-svg',
+    '--export-margin=0',
+    '--export-filename=' .. files.svg,
+    files.pdf,
+  }
+end
+
 -- How every renderer finishes: a captioned block becomes a `pandoc.Figure`
 -- so that `%%| caption:` and `fig-attr` behave identically whichever renderer
 -- drew it, and an uncaptioned one is emitted bare — no float, no centring,
@@ -955,51 +1036,28 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
   end
   -- The svg converter is only needed when we actually convert to SVG. For
   -- PDF output we embed the intermediate PDF directly and nothing here is
-  -- invoked. When a custom svg-command is set, dependency-check the
-  -- command's executable; otherwise the configured svg-engine.
-  if conf.output_format ~= 'pdf' then
-    local svg_cmd = conf.svg_command and conf.svg_command[1] or conf.svg_engine
-    if not check_dependency(svg_cmd) then
-      return nil, svg_cmd .. " not found. Please install it (the configured svg converter) to convert TeX output to SVG."
-    end
+  -- invoked.
+  local base_filename = basename or "tikz-image"
+  local files = {
+    tex = base_filename .. ".tex",
+    pdf = base_filename .. ".pdf",
+    svg = base_filename .. ".svg",
+    dvi = base_filename .. ".dvi",
+    log = base_filename .. ".log",
+  }
+  local convert_cmd, convert_args = convert_command(conf, files)
+  if conf.output_format ~= 'pdf' and not check_dependency(convert_cmd) then
+    return nil, convert_cmd .. " not found. Install it (it is the configured " ..
+      "SVG converter), or set tikz.svg-engine / tikz.svg-command to one you " ..
+      "do have."
   end
 
   local function process_in_dir(dir)
     return with_working_directory(dir, function()
-      -- Define file names:
-      -- Use the provided basename or default to "tikz-image"
-      local base_filename = basename or "tikz-image"
-      local tikz_file = base_filename .. ".tex"
-      local pdf_file = base_filename .. ".pdf"
-      local svg_file = base_filename .. ".svg"
-      local dvi_file = base_filename .. ".dvi"
-
-      -- Build the LaTeX document. Use the user's template if they supplied
-      -- one via tikz.tex-template; otherwise fall back to the bundled
-      -- standalone template.
-      local tikz_template = pandoc.template.compile(
-        conf.tex_template_content or [[
-\documentclass[tikz]{standalone}
-% \usepackage{tikz} % already loaded by the documentclass
-$additional-packages$
-$for(header-includes)$
-$it$
-$endfor$
-\begin{document}
-$body$
-\end{document}
-      ]])
-      local additional, headers = preamble_parts(user_opts)
-      local meta = {
-        ['header-includes'] = { pandoc.RawInline('latex', headers) },
-        ['additional-packages'] = { pandoc.RawInline('latex', additional) },
-      }
-      local tex_code = pandoc.write(
-        pandoc.Pandoc({ pandoc.RawBlock('latex', code) }, meta),
-        'latex',
-        { template = tikz_template }
+      write_file(
+        files.tex,
+        build_tex_document(code, user_opts, conf.tex_template_content)
       )
-      write_file(tikz_file, tex_code)
 
       -- Execute the LaTeX compiler with TEXINPUTS so blocks can \input or
       -- \usepackage shared files from the qmd directory or the extension dir.
@@ -1007,38 +1065,30 @@ $body$
       -- onto a copy of the current env to preserve PATH and friends.
       local env = pandoc.system.environment()
       env.TEXINPUTS = conf.texinputs
-      -- dvisvgm consumes a DVI file, so ask the TeX engine for DVI output
-      -- in that case. Every other path (inkscape, pdftocairo, custom
-      -- svg-command, PDF passthrough) consumes the default PDF output.
-      local latex_args = { '-interaction=nonstopmode' }
       -- Ask for DVI only when the converter we are actually going to run
-      -- consumes one. Keying this off `svg_engine` alone was wrong: a custom
-      -- `svg-command` overrides the engine at conversion time, so
-      -- `svg-engine: dvisvgm` plus `svg-command:` produced a DVI and then
-      -- handed the converter a `{input}` naming a PDF that was never
-      -- written.
+      -- consumes one; every other path reads the default PDF output. See
+      -- `intermediate_format`.
+      local latex_args = { '-interaction=nonstopmode' }
       if conf.intermediate == 'dvi' then
         table.insert(latex_args, '-output-format=dvi')
       end
-      table.insert(latex_args, tikz_file)
+      table.insert(latex_args, files.tex)
       local success, latex_result = pcall(function()
         return pandoc.system.with_environment(env, function()
           return pandoc.pipe(conf.tex_engine, latex_args, '')
         end)
       end)
       if not success then
-        local log_file = base_filename .. ".log"
-        local log_content = read_file(log_file) or ""
         return nil, "Error compiling TikZ figure '" .. base_filename .. "':\n" ..
-          tostring(latex_result) .. "\nLaTeX Log:\n" .. log_content ..
-          "\nTikZ Code:\n" .. code
+          tostring(latex_result) .. "\nLaTeX Log:\n" ..
+          (read_file(files.log) or "") .. "\nTikZ Code:\n" .. code
       end
 
       -- For PDF output, embed the intermediate PDF directly — no SVG
       -- conversion needed. This skips the Inkscape rasterization round-trip
       -- and preserves vector fidelity / fonts in the rendered PDF.
       if conf.output_format == 'pdf' then
-        local imgdata = read_file(pdf_file)
+        local imgdata = read_file(files.pdf)
         if not imgdata then
           return nil, "Failed to read generated PDF file for TikZ figure '" ..
             base_filename .. "'.\nTikZ Code:\n" .. code
@@ -1046,58 +1096,7 @@ $body$
         return imgdata, 'application/pdf'
       end
 
-      -- Convert TeX output to SVG. If the user supplied a custom command
-      -- via `svg-command`, that takes precedence; otherwise dispatch on
-      -- the configured svg-engine.
-      local convert_cmd = conf.svg_engine
-      local convert_args
-      if conf.svg_command then
-        -- Substitute {input}/{output} placeholders. Element 1 is the
-        -- executable; remaining elements are its args.
-        convert_cmd = conf.svg_command[1]
-        convert_args = {}
-        for i = 2, #conf.svg_command do
-          -- rep_escape because these are gsub *replacements*: a '%' in a
-          -- user-supplied `filename` would otherwise be a capture reference.
-          local arg = conf.svg_command[i]
-            :gsub('{input}', rep_escape(pdf_file))
-            :gsub('{output}', rep_escape(svg_file))
-          convert_args[#convert_args + 1] = arg
-        end
-      elseif conf.svg_engine == 'dvisvgm' then
-        -- dvisvgm reads DVI directly. --font-format=woff embeds fonts as
-        -- WOFF (instead of converting glyphs to paths), which keeps text
-        -- selectable / styleable in the rendered SVG. Note: dvisvgm must
-        -- be the TeX-Live-integrated build (e.g. via tlmgr); standalone
-        -- packages can fail to find the PostScript prologue files.
-        convert_args = {
-          '--font-format=woff',
-          '-o', svg_file,
-          dvi_file,
-        }
-      elseif conf.svg_engine == 'pdftocairo' then
-        -- pdftocairo (poppler-utils) reads PDF and is widely available;
-        -- a good lightweight alternative to Inkscape for systems where
-        -- Inkscape isn't installed.
-        convert_args = {
-          '-svg',
-          pdf_file,
-          svg_file,
-        }
-      else
-        -- Inkscape default. Note: --pages=N (Inkscape 1.2+) is omitted
-        -- because the standalone class always produces a single-page PDF,
-        -- and dropping it preserves compatibility with Inkscape 1.0/1.1
-        -- (issue #4).
-        convert_args = {
-          '--export-area-drawing',
-          '--export-type=svg',
-          '--export-plain-svg',
-          '--export-margin=0',
-          '--export-filename=' .. svg_file,
-          pdf_file,
-        }
-      end
+      -- Convert TeX output to SVG with the command chosen above.
       local success_convert, convert_result = pcall(
         pandoc.pipe, convert_cmd, convert_args, ''
       )
@@ -1108,7 +1107,7 @@ $body$
       end
 
       -- Read the SVG file
-      local imgdata = read_file(svg_file)
+      local imgdata = read_file(files.svg)
       if not imgdata then
         return nil, "Failed to read generated SVG file for TikZ figure '" ..
           base_filename .. "'.\nTikZ Code:\n" .. code
@@ -1574,6 +1573,8 @@ TIKZ_TEST = {
   hashable_code = hashable_code,
   code_part = code_part,
   match_loader_line = match_loader_line,
+  convert_command = convert_command,
+  build_tex_document = build_tex_document,
   as_figure = as_figure,
   cache_filename = cache_filename,
   intermediate_format = intermediate_format,

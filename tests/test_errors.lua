@@ -60,6 +60,39 @@ data, msg = compile(PIC, {}, {
 check('pdf output does not require the svg converter',
   msg and msg:find('tikz-no-such-tex-engine', 1, true) ~= nil, true)
 
+-- The converter dispatch, without needing any converter installed. This is
+-- where `svg-command` overriding `svg-engine` is decided, which is the
+-- pairing that used to disagree with the DVI request.
+local CC = TIKZ_TEST.convert_command
+local FILES = {pdf = 'd.pdf', dvi = 'd.dvi', svg = 'd.svg'}
+local function joined(conf)
+  local cmd, args = CC(conf, FILES)
+  return cmd .. ' ' .. table.concat(args, ' ')
+end
+check('inkscape is the default', (CC({}, FILES)), 'inkscape')
+check('inkscape reads the pdf and writes the svg',
+  joined({svg_engine = 'inkscape'}):find('d.pdf', 1, true) ~= nil, true)
+check('dvisvgm reads the dvi',
+  joined({svg_engine = 'dvisvgm'}):find('d.dvi', 1, true) ~= nil, true)
+check('dvisvgm does not read the pdf',
+  joined({svg_engine = 'dvisvgm'}):find('d.pdf', 1, true), nil)
+check('pdftocairo reads the pdf',
+  joined({svg_engine = 'pdftocairo'}), 'pdftocairo -svg d.pdf d.svg')
+check('a custom command wins over the engine',
+  (CC({svg_engine = 'dvisvgm', svg_command = {'pdf2svg', '{input}', '{output}'}},
+      FILES)),
+  'pdf2svg')
+check('…and its placeholders name the pdf, never the dvi',
+  joined({svg_engine = 'dvisvgm',
+          svg_command = {'pdf2svg', '{input}', '{output}'}}),
+  'pdf2svg d.pdf d.svg')
+-- The substitutions are gsub replacements, so a '%' in a user-supplied
+-- `%%| filename:` must not be read as a capture reference.
+check('a percent in the filename survives substitution',
+  (select(2, CC({svg_command = {'x', '{input}'}},
+                {pdf = '100%.pdf', dvi = 'd.dvi', svg = 'd.svg'})))[1],
+  '100%.pdf')
+
 -- Which intermediate file the TeX run must leave behind. `svg-command`
 -- overrides `svg-engine` at conversion time and its {input} names the PDF, so
 -- setting both used to produce a DVI and then look for a PDF that was never
