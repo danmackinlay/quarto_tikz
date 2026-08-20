@@ -204,13 +204,38 @@ local function truthy(value)
   return nil
 end
 
--- Validate a renderer name, translating the one that used to exist. `where`
--- names the source for the warning ("tikz.renderer", "%%| renderer:").
-local function normalize_renderer(value, where)
+-- How a rendered SVG reaches an HTML page: as an `<img src=…>` reference
+-- (the default) or as inline markup.
+local KNOWN_EMBEDS = { img = true, inline = true }
+
+-- Validate an option against its known values. Returns the value when it is
+-- recognized and nil otherwise, so an unusable setting falls through to the
+-- caller's next source: block directive → document metadata → built-in
+-- default. `where` names the source for the message ("tikz.renderer",
+-- "%%| embed:").
+--
+-- The message deliberately does not name the value it is falling back *to*.
+-- It used to — "falling back to 'latex'", "falling back to 'img'" — but the
+-- fallback belongs to the caller's chain, not to this function. With
+-- `tikz: {renderer: tikzjax}` in the front-matter and a block-level
+-- `%%| renderer: bogus`, the user was told they got latex and actually got
+-- tikzjax.
+local function normalize_enum(value, known, where, supported)
   if value == nil then return nil end
   local name = stringify(value)
-  if KNOWN_RENDERERS[name] then return name end
-  if name == 'latex-passthrough' then
+  if known[name] then return name end
+  log.warning(
+    "tikz: unknown " .. where .. " '" .. name .. "' — ignoring it, so the " ..
+    "document-level setting applies (or the default, if there is none). " ..
+    "Supported values: " .. supported .. "."
+  )
+  return nil
+end
+
+-- Renderer names, plus the migration for the one that used to be spelled
+-- as a renderer and is now its own option.
+local function normalize_renderer(value, where)
+  if value ~= nil and stringify(value) == 'latex-passthrough' then
     log.warning(
       "tikz: " .. where .. " no longer takes 'latex-passthrough'. It is now a " ..
       "separate option, because it decides whether a block is rendered at all " ..
@@ -219,26 +244,11 @@ local function normalize_renderer(value, where)
     )
     return nil
   end
-  log.warning(
-    "tikz: unknown " .. where .. " '" .. name .. "' — falling back to 'latex'. " ..
-    "Supported values: latex, tikzjax."
-  )
-  return nil
+  return normalize_enum(value, KNOWN_RENDERERS, where, 'latex, tikzjax')
 end
 
--- How a rendered SVG reaches an HTML page: as an `<img src=…>` reference
--- (the default) or as inline markup.
-local KNOWN_EMBEDS = { img = true, inline = true }
-
 local function normalize_embed(value, where)
-  if value == nil then return nil end
-  local name = stringify(value)
-  if KNOWN_EMBEDS[name] then return name end
-  log.warning(
-    "tikz: unknown " .. where .. " '" .. name .. "' — falling back to 'img'. " ..
-    "Supported values: img, inline."
-  )
-  return nil
+  return normalize_enum(value, KNOWN_EMBEDS, where, 'img, inline')
 end
 
 -- Function to process code block attributes and options

@@ -773,8 +773,10 @@ front-matter or `_quarto.yml`):
 - `renderer` — string, default `latex`. Picks the rendering pipeline:
   `latex` (server-side `tex-engine` + `svg-engine` chain above) or
   `tikzjax` (client-side WebAssembly rendering, HTML output only). See
-  [Renderers](#renderers). An unrecognized value warns and falls back to
-  `latex`.
+  [Renderers](#renderers). An unrecognized value warns and is ignored, so
+  the next source down applies — for a `%%|` directive that is the
+  document-level `renderer`, and for the document-level setting it is the
+  `latex` default. The same holds for `embed`.
 - `latex-passthrough` — boolean, default `false`. Under LaTeX output
   (`format: pdf` or `format: latex`), emit the TikZ source into the host
   document instead of rendering it; `renderer` continues to govern every
