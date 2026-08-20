@@ -83,19 +83,10 @@ end
 -- but not Inkscape, a project with fifty diagrams should report a missing
 -- converter fifty times without running LaTeX fifty times first.
 --
--- What it replaces is `io.popen("command -v " .. cmd .. " 2>/dev/null")`,
--- which had three problems:
---
---   * It interpolated a metadata-controlled string into a shell command, so
---     `tex-engine` could name a pipeline rather than a program. Everywhere
---     else the filter runs external programs through `pandoc.pipe`, which
---     execs directly with no shell in between.
---   * `command -v` is a POSIX shell builtin. Under `cmd.exe` it is not a
---     command at all, so the probe always came back empty and *every*
---     Windows render reported "pdflatex not found on PATH" — despite the
---     Windows handling in `cachedir` and `build_texinputs`.
---   * It spawned a subprocess per diagram to answer a question whose answer
---     cannot change during a render.
+-- Searched here rather than by asking a shell. `cmd` is metadata-controlled,
+-- so it must never be interpolated into a shell command; `command -v` is a
+-- POSIX builtin and does not exist under `cmd.exe`; and a subprocess per
+-- diagram answers a question whose answer cannot change during a render.
 local function readable(path)
   local fh = io.open(path, 'rb')
   if not fh then return false end
@@ -532,36 +523,21 @@ local function mime_for_format(format)
   return 'image/svg+xml'
 end
 
--- Construct a cache filename of the form `<label>.<short-hash>.<format>`.
--- Including the basename makes a directory listing diagnosable (you can
--- tell which diagram produced which file at a glance), while the short
--- hash preserves cache-key uniqueness across code/option changes.
+-- Encode an option table so it can be hashed. Not `stringify(options)`, which
+-- is wrong in two ways that each end in a shared or orphaned cache entry.
 --
--- When the caller-supplied basename is the auto-generated SHA1 of the
--- block's code (40 hex chars), we use a short literal label instead;
--- repeating the full content hash inside the filename adds no diagnostic
--- value and bloats the listing.
---
--- The key is built from a canonical encoding of the options rather than from
--- `stringify(options)` directly, for two reasons.
---
--- Order. `pairs()` iteration order is unspecified by the Lua spec. It is
--- stable for a given build, so this looks fine until the day Quarto ships a
--- pandoc whose Lua hashes keys differently — at which point every cached file
--- in every project is orphaned at once. For the in-tree cache pattern the
--- README recommends, that means a build host without TeX starts failing during
--- an unrelated dependency upgrade, with no local repro. (#21)
+-- Order. `pairs()` iteration order is unspecified by the Lua spec — stable for
+-- any one build, so a pandoc upgrade that hashes keys differently would orphan
+-- every cached file in every project at once. (#21)
 --
 -- Ambiguity. `stringify` on a table emits its *values*, concatenated with no
--- delimiter and no keys at all. So `{a = 'x', b = ''}` and `{a = '', b = 'x'}`
--- hash alike, as do `{a = 'p', b = 'q'}` and `{a = 'pq', b = ''}` — different
--- options, one cache entry, and whichever block is rendered first wins. That
--- one is a wrong image rather than a missing one.
+-- delimiter and no keys, so `{a = 'x', b = ''}` and `{a = '', b = 'x'}` hash
+-- alike — different options, one entry, and whichever block renders first wins.
 --
 -- Sorting fixes the first; length-prefixing each key and value fixes the
--- second, including for values that themselves contain the delimiters. The
--- code is length-prefixed too, so a block whose text happens to end in what
--- another block's options encode to cannot collide with it.
+-- second, including values containing the delimiters themselves. The code is
+-- length-prefixed too, so a block whose text happens to end in what another
+-- block's options encode to cannot collide with it.
 local function canonical_options(options)
   local keys = {}
   for k in pairs(options) do keys[#keys + 1] = k end
@@ -577,13 +553,15 @@ end
 -- The name every artifact of one diagram shares, extension aside: its cache
 -- entry, its mediabag entry, and its `save-tex` directory.
 --
--- One function because those three used to be named three ways. Only the cache
--- folded the options into the name; the mediabag and the `save-tex` directory
--- used the bare basename. Two blocks with identical TikZ and different options
--- — `additionalPackages` differing, say — therefore wrote two correct cache
--- entries and then collapsed onto one mediabag file, so the block rendered
--- first displayed the other block's diagram. Two blocks sharing an explicit
--- `%%| filename:` collided the same way, whatever their code.
+-- `<label>.<short-hash>`: the label makes a directory listing diagnosable at a
+-- glance, and the hash — taken over the code *and* the options — keeps two
+-- diagrams apart. When the basename is the auto-generated SHA1 of the code (40
+-- hex chars) a short literal label is used instead, since repeating the full
+-- content hash inside the name tells the reader nothing.
+--
+-- One function because these were once named three different ways, and only
+-- the cache folded the options in — so two blocks differing only in their
+-- options shared a single image file.
 local function artifact_name(basename, hash, options)
   local key = pandoc.sha1(#hash .. ':' .. hash .. canonical_options(options))
   local label = basename or 'tikz'
@@ -761,9 +739,8 @@ local function picture_markers(line)
 end
 
 -- Prepare a block body for passthrough: hoist the library loads into the host
--- preamble. The `%%|` option directives are already gone — `split_directives`
--- removes them before any renderer sees the code, so this no longer carries
--- its own third opinion about what one looks like. Returns the preamble lines,
+-- preamble. The `%%|` option directives are already gone: `split_directives`
+-- removes them before any renderer sees the code. Returns the preamble lines,
 -- the remaining body, and any warnings.
 --
 -- Two passes, because how a load is written decides what we may do with it:
@@ -789,18 +766,10 @@ end
 -- hard error), one whose argument won't brace-balance, and `\usepackage` /
 -- `\usegdlibrary`. Those only produce a warning.
 --
--- Pass 1 tracks `tikzpicture` depth for exactly that reason. It used to run
--- before any depth was known, so an own-line loader *inside* a picture was
--- silently moved — the one case the paragraph above promises to leave alone,
--- and the one where moving it is most likely to be wrong:
---
---     \node {
---     \usetikzlibrary{arrows}
---     };
---
--- is literal content on its own line. Deleting it changes the drawing and
--- adds a preamble line nobody asked for. Pass 2 already refused the same
--- construct when it shared a line with other code; the two passes now agree.
+-- Pass 1 tracks `tikzpicture` depth for exactly that reason, so that both
+-- passes agree about a loader inside a picture. An own-line one is still
+-- literal content — `\node {` / `\usetikzlibrary{arrows}` / `};` — and moving
+-- it would change the drawing.
 local function prepare_passthrough_body(code)
   local preamble, body, warns = {}, {}, {}
 
@@ -1191,11 +1160,9 @@ end
 -- drew it, and an uncaptioned one is emitted bare — no float, no centring,
 -- placement left to the caller.
 --
--- The only thing that differed between the four copies of this was whether
--- the content was already a Block. Three renderers produce a `RawBlock`,
--- which `Figure` takes directly; the `<img>` path produces an `Image`, which
--- is an Inline and needs a `Plain` around it. That is now handled here rather
--- than restated at each return.
+-- Three renderers produce a `RawBlock`, which `Figure` takes directly; the
+-- `<img>` path produces an `Image`, which is an Inline and needs a `Plain`
+-- around it. Handled here rather than restated at each return.
 local function as_figure(content, dgr_opt)
   local block = content.t == 'Image' and pandoc.Plain { content } or content
   if not dgr_opt.caption then return block end
@@ -1205,23 +1172,15 @@ end
 -- Compile TikZ code to either SVG (default) or PDF (passthrough, used when
 -- the Quarto output format is PDF).
 --
--- Returns `imgdata, mimetype` on success and `nil, message` on failure. It
--- deliberately does not use `error()` for expected failures — a missing TeX
--- engine, a LaTeX run that did not produce a file. Under Quarto, `error()`
--- inside a filter is intercepted: the message is logged but execution
--- *continues to the next statement*, and a surrounding `pcall` reports
--- success. Verified on Quarto 1.10.18 with an eight-line filter:
+-- Returns `imgdata, mimetype` on success and `nil, message` on failure, and
+-- deliberately does not `error()` for an expected failure — a missing TeX
+-- engine, a LaTeX run that produced no file.
 --
---     error('boom')                      --> logs "ERROR (…) boom", continues
---     pcall(function() error('boom') end) --> true, nil
---
--- So every `error()` here used to be a log-and-carry-on that left the rest of
--- the pipeline running against a file that was never produced: one missing
--- engine emitted four errors, then handed `nil` to the cache writer, whose
--- genuine runtime error (`fh:write(nil)`) *did* propagate and took the entire
--- render down. Returning failures makes the control flow independent of the
--- host's error semantics, which is what we want regardless of which way
--- Quarto jumps in future. (#30)
+-- `error()` inside a filter does not do what it looks like under Quarto
+-- (verified on 1.10.18): the message is logged but execution continues to the
+-- next statement, and a surrounding `pcall` reports success. Returning
+-- failures keeps this control flow independent of the host's error semantics,
+-- whichever way Quarto jumps in future. (#30)
 local function compile_tikz_to_svg(code, user_opts, conf, name)
   -- Ensure required dependencies are available
   if not check_dependency(conf['tex-engine']) then
@@ -1342,19 +1301,11 @@ end
 --   * `embed`              — how a rendered SVG reaches an HTML page. Changes
 --                            the delivery, never the bytes.
 --
--- `key_opts` is a *separate table*, not `user_opt` with keys deleted from it.
--- That distinction is the whole point of this function. The old code mutated
--- one table that served as both compiler options and cache-key material, so
--- every axis had to remember to erase its own raw directive text before the
--- key was taken. `embed` and `latex-passthrough` remembered; `renderer` did
--- not, and a no-op `%%| renderer: latex` therefore produced a second cache
--- entry for a byte-identical image — as did any value that had already been
--- warned about and discarded. That is the #28 failure again: a presentation
--- level edit orphaning a committed cache entry, invisible on a machine with
--- TeX and fatal on a build host without one.
---
--- Building the key from the *resolved* values instead makes that class of bug
--- unreachable: a raw directive can only reach the key by being copied there.
+-- `key_opts` is a *separate table*, not `user_opt` with keys deleted from it,
+-- and it is built from the *resolved* values. That is the whole point of this
+-- function: a raw directive can only reach the key by being copied there, so a
+-- no-op `%%| renderer: latex` — or a value that was rejected and warned about
+-- — cannot mint a second cache entry for a byte-identical image. (#28)
 local function resolve_axes(user_opt, conf)
   local renderer = resolve_option('renderer', user_opt, conf)
   local passthrough = resolve_option('latex-passthrough', user_opt, conf)
@@ -1459,20 +1410,12 @@ local function code_to_figure(conf)
       conf.image_cache, basename, hash, key_opts, image_format)
 
     if not imgdata or not imgtype then
-      -- No cached image; compile TikZ code. Two failure channels, because
-      -- they mean different things and only one of them is under our
-      -- control:
-      --
-      --   * `compile_tikz_to_svg` returns `nil, message` for an expected
-      --     failure — a missing engine, a LaTeX run that produced no file.
-      --   * `pcall` still guards against a genuine runtime error in the
-      --     filter itself, which (unlike `error()`, see the note on
-      --     compile_tikz_to_svg) really does propagate under Quarto.
-      --
-      -- Either way one diagram must not take down the render: log it once,
-      -- leave the block as its source, and let the rest of the document
-      -- through. On a build host without TeX that turns a failed publish
-      -- into a cosmetic gap. (#30)
+      -- No cached image; compile. Two failure channels: a returned
+      -- `nil, message` for an expected failure, and `pcall` for a genuine
+      -- runtime error in the filter itself, which — unlike `error()`, see the
+      -- note on `compile_tikz_to_svg` — really does propagate under Quarto.
+      -- Either way one diagram must not take down the render: log it, leave
+      -- the block as its source, and let the document through. (#30)
       local ok, result, extra = pcall(function()
         return compile_tikz_to_svg(code, compile_opts, conf, name)
       end)
