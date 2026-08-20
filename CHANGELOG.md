@@ -25,6 +25,18 @@ options.
   cross-reference at the fenced-div pattern, which is where it stays. Figure
   attributes set the other ways — `%%| label:`, `%%| name:`, and `fig-`-prefixed
   fence attributes — are unaffected.
+- **`format: pdf` with `svg-engine: dvisvgm` failed every diagram.** Under
+  LaTeX output the TeX run's own PDF is embedded directly and no converter
+  runs, but the DVI request was still keyed off `svg-engine` — so the TeX
+  engine was asked for a DVI and the filter then read a PDF nothing had
+  written. `svg-engine` correctly has no effect under LaTeX output now.
+- **Two diagrams could share one image file.** Only the cache folded a
+  block's options into the filename it wrote; the mediabag entry and the
+  `save-tex` directory used the code hash alone. Two blocks with identical
+  TikZ and different options — or sharing an explicit `%%| filename:` —
+  therefore collapsed onto one file, and the block rendered first displayed
+  the other one's diagram. All three now share one name, derived from the
+  code and the options together.
 - **A directive on the block's last line was silently ignored.** Pandoc strips
   the trailing newline from a code block, and the option reader's pattern ran to
   a newline, so a `%%| caption:` or `%%| renderer:` written as the block's final
@@ -69,6 +81,12 @@ options.
   `<img capton="…">`. A directive naming a document-level option — `%%| cache:
   true` — is reported and ignored, since it never had an effect there. Fence
   attributes are unaffected: an arbitrary image attribute is what they are for.
+- Generated image filenames change shape, from a bare 40-character SHA1 to
+  the `<label>.<short-hash>.<ext>` form the cache has used since 1.2.1 — so
+  `my-fancy-diagram.53efa4b1.svg` rather than `8cd4809a63b4….svg`. This is
+  what fixes the collision above; it also means a mediabag or `save-tex`
+  listing says which diagram produced each file, as a cache listing already
+  did.
 - The three `%%|` parsers are now one. The option reader, the cache-key code
   stripper and the passthrough body preparer each carried their own idea of what
   a `%%|` line was, and they disagreed — which is what every parsing fix above

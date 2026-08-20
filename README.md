@@ -402,9 +402,16 @@ nothing is cached. What is left in them is presentation: `caption`,
 `alt`, `label`, `name`, `filename`. Adding a caption, or migrating a
 block from the deprecated `{.tikz filename='x'}` fence attribute to the
 canonical `%%| filename: x`, therefore leaves the
-cache entry intact rather than silently orphaning it. A `ls` of the
-cache directory is therefore enough to tell at a glance which diagram
-in which document each entry came from.
+cache entry intact rather than silently orphaning it.
+
+Every artifact a diagram produces is named the same way —
+`<label>.<short-hash>.<ext>`, where the label is your `%%| filename:` or
+a short literal — so a `ls` of the cache directory, of the mediabag, or
+of a `save-tex` tree tells you at a glance which diagram each file came
+from. The hash covers the options as well as the code, so two blocks
+that differ only in their `additionalPackages` (or that share an
+explicit `filename`) get a file each rather than one silently
+overwriting the other.
 
 The hash is computed from a canonical encoding of those inputs — keys
 sorted, and each key and value length-prefixed. Sorting matters because
@@ -697,6 +704,10 @@ anything else warns and leaves the default in place.
     keeping text in the rendered SVG selectable. Requires a
     TeX-Live-integrated `dvisvgm`; standalone packages may fail to find
     PostScript prologue files.
+
+  `svg-engine` has no effect under LaTeX output, where the TeX run's own
+  PDF is embedded directly and no converter runs at all. Setting it there
+  is harmless — it simply does not apply.
 - `svg-command` — string or list. Escape hatch for wiring any other
   PDF → SVG converter (`pdf2svg`, a `pymupdf` script, `mutool draw`,
   etc.) without us having to bless each tool individually. The first
