@@ -398,6 +398,13 @@ justify right now.
 
 ## Debugging a diagram
 
+A diagram that cannot be rendered — no TeX engine on the machine, a
+LaTeX error in the block, a missing SVG converter — is reported once,
+naming the figure and the cause, and its block is left in the output as
+its own source. The rest of the document renders normally. One broken
+diagram is a cosmetic gap, never a failed build; that matters most on a
+build host that has no TeX because it renders from a committed cache.
+
 When a TikZ block silently produces something wrong (or fails to
 compile), the quickest way to diagnose it is to look at the intermediate
 files (`.tex`, `.pdf` or `.dvi`, and `.log`) the TeX engine actually
@@ -885,12 +892,13 @@ build itself succeeds — the missing diagram is your signal.
 ## Tests
 
 The filter's pure helpers have unit tests — the `latex-passthrough` comment
-stripping, library-loader matching and move/copy split, and the cache-key
-encoding. Run them from the repo root:
+stripping, library-loader matching and move/copy split, the cache-key
+encoding, and the compile failure paths. Run them from the repo root:
 
 ```sh
 pandoc lua tests/test_passthrough.lua
 pandoc lua tests/test_cache_key.lua
+pandoc lua tests/test_errors.lua
 ```
 
 They need nothing beyond `pandoc`, which the extension already requires.
