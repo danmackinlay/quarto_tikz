@@ -35,7 +35,7 @@ local compile = TIKZ_TEST.compile_tikz_to_svg
 local PIC = '\\begin{tikzpicture}\\draw (0,0);\\end{tikzpicture}'
 
 local data, msg = compile(PIC, {}, {
-  tex_engine = 'tikz-no-such-tex-engine', output_format = 'svg',
+  tex_engine = 'tikz-no-such-tex-engine', image_format = 'svg',
 }, 'demo')
 check('missing tex engine returns no data', data, nil)
 check('missing tex engine explains itself',
@@ -45,7 +45,7 @@ check('missing tex engine names the engine',
 
 -- `sh` stands in for a TeX engine that exists, so the second check is reached.
 data, msg = compile(PIC, {}, {
-  tex_engine = 'sh', output_format = 'svg',
+  tex_engine = 'sh', image_format = 'svg',
   svg_command = {'tikz-no-such-converter', '{input}', '{output}'},
 }, 'demo')
 check('missing svg converter returns no data', data, nil)
@@ -54,7 +54,7 @@ check('missing svg converter names the command',
 
 -- For PDF output no converter is needed, so a bogus one must not be checked.
 data, msg = compile(PIC, {}, {
-  tex_engine = 'tikz-no-such-tex-engine', output_format = 'pdf',
+  tex_engine = 'tikz-no-such-tex-engine', image_format = 'pdf',
   svg_command = {'tikz-no-such-converter'},
 }, 'demo')
 check('pdf output does not require the svg converter',

@@ -250,6 +250,20 @@ local function normalize_embed(value, where)
   return normalize_enum(value, KNOWN_EMBEDS, where, 'img, inline')
 end
 
+-- Per-block options, mapping the directive name a user writes to the key the
+-- renderers read. Every one of these must be listed: the catch-all at the end
+-- of the loop below turns an unrecognized attribute into an *image*
+-- attribute, so anything omitted here silently becomes `<img embed="inline">`
+-- rather than an option. Two of the entries used to be `elseif` branches
+-- whose only content was a comment saying exactly that.
+local BLOCK_OPTIONS = {
+  additionalPackages = 'additional-packages',
+  ['header-includes'] = 'header-includes',
+  renderer = 'renderer',
+  embed = 'embed',
+  ['latex-passthrough'] = 'latex-passthrough',
+}
+
 -- Function to process code block attributes and options
 local function diagram_options(cb)
   -- The `%%| key: value` comment directives are the canonical, current
@@ -281,27 +295,16 @@ local function diagram_options(cb)
   local user_opt = {}
 
   for attr_name, value in pairs(attribs) do
-    if attr_name == 'alt' then
+    local opt_key = BLOCK_OPTIONS[attr_name]
+    if opt_key then
+      user_opt[opt_key] = value
+    elseif attr_name == 'alt' then
       alt = value
     elseif attr_name == 'caption' then
       -- Read caption attribute as Markdown
       caption = pandoc.read(value, 'markdown').blocks
     elseif attr_name == 'filename' then
       filename = value
-    elseif attr_name == 'additionalPackages' then
-      user_opt['additional-packages'] = value
-    elseif attr_name == 'header-includes' then
-      user_opt['header-includes'] = value
-    elseif attr_name == 'renderer' then
-      user_opt['renderer'] = value
-    elseif attr_name == 'embed' then
-      -- Named explicitly so it does not fall through to the catch-all below
-      -- and end up as an image attribute.
-      user_opt['embed'] = value
-    elseif attr_name == 'latex-passthrough' then
-      -- Named explicitly so it does not fall through to the `latex-` prefix
-      -- rule below and end up as an image attribute.
-      user_opt['latex-passthrough'] = value
     elseif attr_name == 'label' then
       fig_attr.id = value
     elseif attr_name == 'name' then
@@ -1046,7 +1049,7 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
     log = base_filename .. ".log",
   }
   local convert_cmd, convert_args = convert_command(conf, files)
-  if conf.output_format ~= 'pdf' and not check_dependency(convert_cmd) then
+  if conf.image_format ~= 'pdf' and not check_dependency(convert_cmd) then
     return nil, convert_cmd .. " not found. Install it (it is the configured " ..
       "SVG converter), or set tikz.svg-engine / tikz.svg-command to one you " ..
       "do have."
@@ -1087,7 +1090,7 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
       -- For PDF output, embed the intermediate PDF directly — no SVG
       -- conversion needed. This skips the Inkscape rasterization round-trip
       -- and preserves vector fidelity / fonts in the rendered PDF.
-      if conf.output_format == 'pdf' then
+      if conf.image_format == 'pdf' then
         local imgdata = read_file(files.pdf)
         if not imgdata then
           return nil, "Failed to read generated PDF file for TikZ figure '" ..
@@ -1235,7 +1238,7 @@ local function code_to_figure(conf)
     -- Checked before the renderers, because it decides *whether* to render:
     -- a `renderer: tikzjax` document with passthrough on must hand its source
     -- to a LaTeX build, not fall into tikzjax's drop-for-non-HTML rule.
-    if passthrough and conf.output_format == 'pdf' then
+    if passthrough and conf.host_is_latex then
       local raw = embed_latex_passthrough(
         block.text, compile_opts,
         dgr_opt.filename or blank_to_nil(dgr_opt['fig-attr'].id) or '<unnamed>'
@@ -1266,9 +1269,9 @@ local function code_to_figure(conf)
 
     -- Check if image is cached
     local imgdata, imgtype = nil, nil
-    local out_format = conf.output_format
+    local image_format = conf.image_format
     imgdata, imgtype = get_cached_image(
-      conf.image_cache, basename, hash, key_opts, out_format)
+      conf.image_cache, basename, hash, key_opts, image_format)
 
     if not imgdata or not imgtype then
       -- No cached image; compile TikZ code. Two failure channels, because
@@ -1303,10 +1306,10 @@ local function code_to_figure(conf)
       end
       -- pcall returns (true, returned_values...) on success; result is the
       -- imgdata, extra is the MIME string returned by compile_tikz_to_svg.
-      imgdata, imgtype = result, extra or mime_for_format(out_format)
+      imgdata, imgtype = result, extra or mime_for_format(image_format)
 
       -- Cache the image
-      cache_image(conf.image_cache, basename, hash, key_opts, imgdata, out_format)
+      cache_image(conf.image_cache, basename, hash, key_opts, imgdata, image_format)
     end
 
     -- Inline embedding: hand the SVG to the page as markup instead of
@@ -1316,9 +1319,9 @@ local function code_to_figure(conf)
     -- unreachable by the page's CSS. Inlining is what makes `svg-engine:
     -- dvisvgm` worth choosing: its real `<text>` elements only pay off here.
     --
-    -- Restricted to HTML output. `out_format` is 'svg' for everything that is
-    -- not PDF, docx included, and docx needs a genuine image file. (#27)
-    if embed == 'inline' and out_format == 'svg' and is_html_output() then
+    -- Restricted to HTML output. `image_format` is 'svg' for everything that
+    -- is not LaTeX, docx included, and docx needs a genuine image file. (#27)
+    if embed == 'inline' and image_format == 'svg' and is_html_output() then
       inline_svg_seq = inline_svg_seq + 1
       local markup = namespace_svg(imgdata, 'tikz' .. inline_svg_seq, dgr_opt.alt)
       if markup then
@@ -1331,7 +1334,7 @@ local function code_to_figure(conf)
     end
 
     -- Use the block's filename attribute or create a new name by hashing the image content.
-    local fname = basename .. '.' .. out_format
+    local fname = basename .. '.' .. image_format
 
     -- Store the data in the mediabag:
     pandoc.mediabag.insert(fname, imgtype, imgdata)
@@ -1506,12 +1509,22 @@ local function configure (meta)
     )
   end
 
-  -- Output format: 'pdf' when the Quarto output format is PDF, otherwise
-  -- 'svg'. Drives whether we run the SVG engine or embed the PDF directly.
-  local out_format = 'svg'
-  if quarto and quarto.doc and quarto.doc.is_format and quarto.doc.is_format('pdf') then
-    out_format = 'pdf'
-  end
+  -- Is the host document LaTeX? True for `format: pdf`, `beamer` and
+  -- `format: latex` alike (verified: `is_format('pdf')` answers yes to all
+  -- three), which is what `latex-passthrough` needs to know.
+  local host_is_latex = (quarto and quarto.doc and quarto.doc.is_format
+    and quarto.doc.is_format('pdf')) or false
+
+  -- What we produce for that host: the intermediate PDF embedded directly
+  -- under LaTeX, an SVG everywhere else. Doubles as the file extension.
+  --
+  -- Two questions, one variable, until now. `output_format == 'pdf'` was
+  -- read in three places to mean "embed the PDF", "skip the SVG converter"
+  -- and "the host is LaTeX, so passthrough applies" — three different
+  -- questions that happen to share an answer. Naming them separately costs
+  -- one field and stops the next reader having to work out which sense is
+  -- meant at each site.
+  local image_format = host_is_latex and 'pdf' or 'svg'
 
   -- Rendering pipeline. 'latex' (default) runs the server-side TeX +
   -- svg-engine chain configured above; 'tikzjax' emits a
@@ -1554,7 +1567,8 @@ local function configure (meta)
     svg_engine = svg_engine,
     svg_command = svg_command,
     intermediate = intermediate,
-    output_format = out_format,
+    host_is_latex = host_is_latex,
+    image_format = image_format,
     renderer = renderer,
     latex_passthrough = latex_passthrough,
     embed = embed,
@@ -1562,9 +1576,13 @@ local function configure (meta)
   }
 end
 
--- Pure helpers, exercised by the suites under tests/. Exported as a global
--- rather than as a key on the returned table: Quarto only accepts integer keys
--- there and silently drops the whole filter if it finds anything else.
+-- Helpers exercised by the suites under tests/. Mostly pure; the two that are
+-- not (`compile_tikz_to_svg`, `write_file`) are here because their *failure*
+-- paths are what the tests care about, and those are reached before any I/O.
+--
+-- Exported as a global rather than as a key on the returned table: Quarto
+-- only accepts integer keys there and silently drops the whole filter if it
+-- finds anything else.
 TIKZ_TEST = {
   canonical_options = canonical_options,
   namespace_svg = namespace_svg,
