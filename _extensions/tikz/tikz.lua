@@ -157,7 +157,31 @@ local function cachedir ()
   return cache_dir
 end
 
-local tikzjax_assets_injected = false  -- Guards once-per-document injection of TikZJax JS/CSS.
+-- State belonging to one document, cleared at the top of the walk.
+--
+-- The filter is normally one process per render, so nothing here used to be
+-- reset. A host that applied it to two documents in one process would have
+-- carried the TikZJax guard, the hoisted preamble and the inline-SVG counter
+-- from the first into the second — the second document silently losing its
+-- `<script>` tags. Cheap to make correct, and gathering them says what their
+-- lifetime is rather than leaving it to be inferred.
+--
+-- `executable_seen` above is deliberately *not* here: it caches what is on
+-- PATH, which no document can change.
+local doc_state
+local function reset_document_state()
+  doc_state = {
+    tikzjax_assets_injected = false,  -- Once-per-document TikZJax JS/CSS.
+    -- Preamble text hoisted by latex-passthrough, in three ordered buckets and
+    -- flushed once at the end of the walk. Bucket order rather than encounter
+    -- order guarantees a `\usepackage{pgfplots}` from one block precedes a
+    -- `\usepgfplotslibrary{…}` hoisted out of another.
+    passthrough_preamble = { {}, {}, {} },
+    passthrough_header_seen = {},     -- Text already queued, so we emit it once.
+    inline_svg_seq = 0,               -- Namespaces each inlined SVG on the page.
+  }
+end
+reset_document_state()
 
 -- Split a string into lines, dropping the trailing empty element that a
 -- final newline would otherwise produce.
@@ -265,7 +289,18 @@ local OPTIONS = {
   --                                                 contain spaces
   -- `{input}` expands to the intermediate PDF, `{output}` to the target SVG.
   -- Takes precedence over svg-engine; see `convert_command`.
-  ['svg-command'] = { type = 'list',   scope = 'doc' },
+  ['svg-command'] = { type = 'list',   scope = 'doc',
+                      -- A command that names neither placeholder would be run
+                      -- with no PDF to read and would write nothing we could
+                      -- find; a one-element `svg-command` did exactly that.
+                      validate = function(parts)
+                        local joined = table.concat(parts, ' ')
+                        for _, ph in ipairs { '{input}', '{output}' } do
+                          if not joined:find(ph, 1, true) then
+                            return "it never mentions " .. ph
+                          end
+                        end
+                      end },
   -- Base URL serving tikzjax.js and fonts.css: the canonical CDN by default,
   -- overridden to self-host or to pin a fork.
   ['tikzjax-url'] = { type = 'string', scope = 'doc',
@@ -345,6 +380,12 @@ local function read_option(name, value, where)
     if #parts == 0 then
       log.warning("tikz: " .. where .. " is empty — ignoring it, so " ..
         consequence .. ".")
+      return nil
+    end
+    local problem = spec.validate and spec.validate(parts)
+    if problem then
+      log.warning("tikz: " .. where .. " is unusable — " .. problem ..
+        ". Ignoring it, so " .. consequence .. ".")
       return nil
     end
     return parts
@@ -582,15 +623,7 @@ local function cache_image(dir, basename, hash, options, imgdata, format)
   if path then write_file(path, imgdata) end
 end
 
--- Preamble text hoisted by the latex-passthrough renderer, kept in three
--- ordered buckets and flushed once at the end of the document walk. Emitting
--- in bucket order rather than block-encounter order guarantees that a
--- `\usepackage{pgfplots}` from one block precedes a `\usepgfplotslibrary{…}`
--- hoisted out of another, and makes the preamble stable under block
--- reordering.
 local PASSTHROUGH_PACKAGES, PASSTHROUGH_LIBRARIES, PASSTHROUGH_HEADERS = 1, 2, 3
-local passthrough_preamble = { {}, {}, {} }
-local passthrough_header_seen = {}  -- Text already queued, so we emit it once.
 
 -- Queue `text` for the host document's preamble, at most once per render.
 -- Deduplication is by exact text, which is what makes it safe to hoist the
@@ -599,9 +632,9 @@ local passthrough_header_seen = {}  -- Text already queued, so we emit it once.
 -- is emitted in full rather than being cleverly merged.
 local function hoist(bucket, text)
   if not text or text == '' then return end
-  if passthrough_header_seen[text] then return end
-  passthrough_header_seen[text] = true
-  local b = passthrough_preamble[bucket]
+  if doc_state.passthrough_header_seen[text] then return end
+  doc_state.passthrough_header_seen[text] = true
+  local b = doc_state.passthrough_preamble[bucket]
   b[#b + 1] = text
 end
 
@@ -609,7 +642,7 @@ end
 -- document walk, so bucket order is what reaches the `.tex`.
 local function flush_passthrough_preamble()
   local parts = {}
-  for _, bucket in ipairs(passthrough_preamble) do
+  for _, bucket in ipairs(doc_state.passthrough_preamble) do
     for _, text in ipairs(bucket) do parts[#parts + 1] = text end
   end
   if #parts == 0 then return end
@@ -871,8 +904,8 @@ end
 -- Inject TikZJax assets (link + script tags) into the document head exactly
 -- once per render. Subsequent calls are no-ops.
 local function inject_tikzjax_assets(conf)
-  if tikzjax_assets_injected then return end
-  tikzjax_assets_injected = true
+  if doc_state.tikzjax_assets_injected then return end
+  doc_state.tikzjax_assets_injected = true
   local url = conf['tikzjax-url']
   local html = string.format(
     '<link rel="stylesheet" href="%s/fonts.css">\n' ..
@@ -908,11 +941,6 @@ local function is_html_output()
            and quarto.doc.is_format('html:js'))
     or (FORMAT and FORMAT:match('^html') ~= nil)
 end
-
--- Counter giving each inlined SVG on a page its own namespace. A counter
--- rather than the cache key, because two *identical* diagrams share a key and
--- would then share ids as well.
-local inline_svg_seq = 0
 
 -- Rewrite an SVG so it can be dropped into an HTML page beside others.
 --
@@ -1479,8 +1507,8 @@ local function code_to_figure(conf)
     -- Restricted to HTML output. `image_format` is 'svg' for everything that
     -- is not LaTeX, docx included, and docx needs a genuine image file. (#27)
     if embed == 'inline' and image_format == 'svg' and is_html_output() then
-      inline_svg_seq = inline_svg_seq + 1
-      local markup = namespace_svg(imgdata, 'tikz' .. inline_svg_seq, dgr_opt.alt)
+      doc_state.inline_svg_seq = doc_state.inline_svg_seq + 1
+      local markup = namespace_svg(imgdata, 'tikz' .. doc_state.inline_svg_seq, dgr_opt.alt)
       if markup then
         return as_figure(pandoc.RawBlock('html', markup), dgr_opt)
       end
@@ -1507,8 +1535,13 @@ end
 local function absolutize(p)
   if not p or p == '' then return nil end
   if pandoc.path.is_absolute(p) then return p end
-  local cwd = os.getenv('PWD') or os.getenv('CD') or '.'
-  return pandoc.path.normalize(pandoc.path.join { cwd, p })
+  -- `pandoc.system.get_working_directory()` rather than $PWD: PWD is a shell
+  -- convention, not something every launcher exports, and the old `or '.'`
+  -- fallback produced exactly the relative path this function exists to
+  -- prevent.
+  return pandoc.path.normalize(
+    pandoc.path.join { pandoc.system.get_working_directory(), p }
+  )
 end
 
 -- Build TEXINPUTS so TikZ blocks can \input shared files from the qmd
@@ -1674,6 +1707,7 @@ TIKZ_TEST = {
 return {
   {
     Pandoc = function(doc)
+      reset_document_state()
       local conf = configure(doc.meta)
       local result = doc:walk {
         CodeBlock = code_to_figure(conf),

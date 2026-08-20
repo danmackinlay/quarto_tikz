@@ -158,5 +158,7 @@ ok = pcall(RO, 'cache', 'perhaps', 'tikz.cache')
 check('boolean warning path does not raise without quarto', ok, true)
 ok = pcall(RO, 'svg-command', '  ', 'tikz.svg-command')
 check('empty-list warning path does not raise without quarto', ok, true)
+ok = pcall(RO, 'svg-command', 'pdf2svg', 'tikz.svg-command')
+check('invalid-list warning path does not raise without quarto', ok, true)
 
 t.done()

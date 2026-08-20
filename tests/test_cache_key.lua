@@ -185,6 +185,16 @@ check('a whitespace-tokenized command',
     'tikz.svg-command'), '|'), 'pdf2svg|{input}|{output}')
 check('an all-whitespace command is rejected',
   RO('svg-command', '   ', 'tikz.svg-command'), nil)
+-- A command that names neither placeholder would be run with no PDF to read
+-- and would write nothing we could find. A one-element `svg-command` passed
+-- the non-empty check and did exactly that.
+check('a command with no {input} is rejected',
+  RO('svg-command', 'pdf2svg', 'tikz.svg-command'), nil)
+check('a command with no {output} is rejected',
+  RO('svg-command', 'pdf2svg {input}', 'tikz.svg-command'), nil)
+check('a complete command is kept',
+  table.concat(RO('svg-command', 'pdf2svg {input} {output}',
+    'tikz.svg-command'), ' '), 'pdf2svg {input} {output}')
 
 -- The supported-values list in a diagnostic is the schema's own list, so a
 -- message cannot drift from the set it describes. It already had: the strings
