@@ -662,6 +662,9 @@ front-matter or `_quarto.yml`):
 > separate — that line is required per-doc and unaffected by this
 > merging behaviour.)
 
+Booleans accept `true`/`false`, `yes`/`no` and `1`/`0`, quoted or not;
+anything else warns and leaves the default in place.
+
 - `cache` — boolean, default `false`. Enable the on-disk SVG cache.
 - `cache-dir` — path. Defaults to `$XDG_CACHE_HOME/tikz-diagram-filter`
   (or the per-user cache equivalent on your platform). Override only if
@@ -756,9 +759,9 @@ don't set the same option in both places:
 - `label` — the figure's `id`; `name` — the figure's `name`. Not
   dependably honoured for cross-references; see
   [Captions and cross-references](#captions-and-cross-references).
-- `additionalPackages` — extra `\usepackage{…}` lines added to the
-  preamble of the synthesized LaTeX document (under
-  `latex-passthrough`, to the host document's preamble).
+- `additional-packages` (also accepted as `additionalPackages`) — extra
+  `\usepackage{…}` lines added to the preamble of the synthesized LaTeX
+  document (under `latex-passthrough`, to the host document's preamble).
 - `header-includes` — additional raw LaTeX inserted into the preamble
   (same destinations as `additionalPackages`).
 - `renderer` — `latex` or `tikzjax`. Per-block override of the
@@ -770,9 +773,17 @@ don't set the same option in both places:
 - `embed` — `img` or `inline`. Per-block override of the document-level
   setting.
 
-Attributes prefixed with `fig-`, `image-`/`img-`, or `opt-` on the code
-block fence are routed to the figure, the image, or the per-block
-options respectively.
+Attributes prefixed with `fig-`, `image-`/`img-`, or `opt-` are routed
+to the figure, the image, or the per-block options respectively, whether
+they are written as `%%|` directives or on the code block fence.
+
+A `%%|` directive that names none of the above warns: an unrecognised
+name is passed through as an image attribute (say so explicitly with
+`%%| image-…:` to silence it), and one that names a *document-level*
+option — `%%| cache: true`, say — is reported and ignored, because that
+option only has an effect under `tikz:` in the front matter or
+`_quarto.yml`. Fence attributes are not held to this: an arbitrary image
+attribute is exactly what a fence attribute is for.
 
 ## Recipes
 

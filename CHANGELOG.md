@@ -40,8 +40,35 @@ options.
 - Under `latex-passthrough`, a directive sharing its line with code is no longer
   emitted verbatim into the shipped `.tex`.
 
+- **A quoted boolean meant different things at different levels.** Options
+  were read five different ways depending on where they were written, so
+  `cache: "true"` was compared with `== true` and silently ignored, while
+  `save-tex: "false"` was compared for Lua truthiness — where a non-empty
+  string is true — and silently switched `save-tex` *on*. Only
+  `latex-passthrough` parsed its value properly. All options now read
+  `true`/`false`, `yes`/`no` and `1`/`0` alike, quoted or not, and anything
+  else warns instead of being guessed at.
+- **`%%| additional-packages:` was not an option.** The kebab-case spelling —
+  the natural one, in a vocabulary that is otherwise entirely kebab-case —
+  fell through to the image-attribute catch-all and became
+  `<img additional-packages="\usepackage{…}">`. Both it and
+  `additionalPackages` are accepted now.
+- Diagnostics that list an option's permitted values take them from the
+  option's own declaration, so a message can no longer disagree with the set
+  it describes.
+
 ### Changed
 
+- Every option is declared once — type, default, scope, permitted values —
+  and read through a single reader, replacing five mechanisms that each
+  applied to a different subset. Each of the three fixes above is a
+  consequence of that rather than a patch on top of it.
+- **An unrecognised `%%|` directive now warns.** It is still passed through as
+  an image attribute, so nothing that worked stops working, but a typo
+  (`%%| capton:`) says so instead of appearing in the output as
+  `<img capton="…">`. A directive naming a document-level option — `%%| cache:
+  true` — is reported and ignored, since it never had an effect there. Fence
+  attributes are unaffected: an arbitrary image attribute is what they are for.
 - The three `%%|` parsers are now one. The option reader, the cache-key code
   stripper and the passthrough body preparer each carried their own idea of what
   a `%%|` line was, and they disagreed — which is what every parsing fix above
