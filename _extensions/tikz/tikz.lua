@@ -133,6 +133,21 @@ local function normalize_renderer(value, where)
   return nil
 end
 
+-- How a rendered SVG reaches an HTML page: as an `<img src=…>` reference
+-- (the default) or as inline markup.
+local KNOWN_EMBEDS = { img = true, inline = true }
+
+local function normalize_embed(value, where)
+  if value == nil then return nil end
+  local name = stringify(value)
+  if KNOWN_EMBEDS[name] then return name end
+  quarto.log.warning(
+    "tikz: unknown " .. where .. " '" .. name .. "' — falling back to 'img'. " ..
+    "Supported values: img, inline."
+  )
+  return nil
+end
+
 -- Function to process code block attributes and options
 local function diagram_options(cb)
   -- The `%%| key: value` comment directives are the canonical, current
@@ -177,6 +192,10 @@ local function diagram_options(cb)
       user_opt['header-includes'] = value
     elseif attr_name == 'renderer' then
       user_opt['renderer'] = value
+    elseif attr_name == 'embed' then
+      -- Named explicitly so it does not fall through to the catch-all below
+      -- and end up as an image attribute.
+      user_opt['embed'] = value
     elseif attr_name == 'latex-passthrough' then
       -- Named explicitly so it does not fall through to the `latex-` prefix
       -- rule below and end up as an image attribute.
@@ -649,6 +668,125 @@ local function embed_tikzjax(code, user_opts, conf)
     '<script type="text/tikz">\n' .. body .. '\n</script>')
 end
 
+-- True when the output really is an HTML-family format (html, revealjs, …),
+-- as opposed to merely "not PDF" — docx also renders through the SVG path but
+-- needs a real image file.
+local function is_html_output()
+  return (quarto and quarto.doc and quarto.doc.is_format
+           and quarto.doc.is_format('html:js'))
+    or (FORMAT and FORMAT:match('^html') ~= nil)
+end
+
+-- Counter giving each inlined SVG on a page its own namespace. A counter
+-- rather than the cache key, because two *identical* diagrams share a key and
+-- would then share ids as well.
+local inline_svg_seq = 0
+
+-- Escape a string for use as a Lua pattern / as a gsub replacement.
+local function pat_escape(s) return (s:gsub('(%W)', '%%%1')) end
+local function rep_escape(s) return (s:gsub('%%', '%%%%')) end
+
+-- Rewrite an SVG so it can be dropped into an HTML page beside others.
+--
+-- Inside an `<img>` an SVG is its own document: its ids, CSS classes and
+-- `@font-face` families are sandboxed. Inlined, they are page-global, and
+-- every converter we support emits names that repeat from diagram to diagram.
+-- Verified in a browser, two diagrams per page:
+--
+--   * pdftocairo — worst. `<use xlink:href="#glyph-0-0">` resolves to the
+--     *first* diagram's glyph definitions, so a picture reading "Hello" alone
+--     renders as "W X αα" beside another. `url(#clip-0)` misbinds the same way.
+--   * dvisvgm — `text.f0` is redefined per diagram, so labels take a later
+--     diagram's font and size: 24.8px where 9.96px was meant.
+--   * dvisvgm also declares `@font-face{font-family:cmmi10}` in every diagram
+--     with a *different* embedded subset each time. Chrome happens to fall
+--     back across same-family faces, so this one does not currently show —
+--     but nothing guarantees that, and namespacing it is free.
+--
+-- So all three name kinds are suffixed with a per-diagram nonce, and every
+-- reference form is rewritten in step: `url(#…)`, `href="#…"` and
+-- `xlink:href="#…"` (cairo uses two of the three).
+local function namespace_svg(svg, nonce, alt)
+  -- An inlined SVG is an element, not a document: drop the XML prolog,
+  -- any DOCTYPE, and the generator comments that precede the root tag.
+  local root = svg:find('<svg', 1, true)
+  if not root then return nil end
+  svg = svg:sub(root)
+
+  local function rename(names, rewrites)
+    for name in pairs(names) do
+      -- `from` is spliced into a pattern by an inner gsub, so it has to survive
+      -- being a *replacement* first: pat_escape('glyph-0-0') is 'glyph%-0%-0',
+      -- and a bare '%-' in a replacement string is an error.
+      local from = rep_escape(pat_escape(name))
+      local to = rep_escape(rep_escape(name .. '-' .. nonce))
+      for _, r in ipairs(rewrites) do
+        svg = svg:gsub(r[1]:gsub('@', from), (r[2]:gsub('@', to)))
+      end
+    end
+  end
+
+  -- ids, and the three ways one SVG refers to another element. The patterns
+  -- are anchored on the closing quote or paren, so an id that is a prefix of
+  -- another (`clip-0` inside `clip-01`) cannot be partially rewritten.
+  local ids = {}
+  for q, name in svg:gmatch('id%s*=%s*(["\'])(.-)%1') do
+    if name ~= '' then ids[name] = true end
+  end
+  rename(ids, {
+    { '(id%s*=%s*["\'])@(["\'])',   '%1@%2' },
+    { 'url%(#@%)',                  'url(#@)' },
+    { '(href%s*=%s*["\'])#@(["\'])', '%1#@%2' },
+  })
+
+  -- CSS class names: the `class='f0'` attribute and the `.f0 {` selector.
+  -- Only single-class attributes are matched; no converter we support emits
+  -- multiple classes on one element.
+  local classes = {}
+  for name in svg:gmatch('class%s*=%s*["\']([%w_%-]+)["\']') do classes[name] = true end
+  rename(classes, {
+    { '(class%s*=%s*["\'])@(["\'])', '%1@%2' },
+    { '(%.)@(%s*{)',                 '%1@%2' },
+  })
+
+  -- `@font-face` families, and both ways a family is referenced.
+  local families = {}
+  for name in svg:gmatch('@font%-face%s*{%s*font%-family%s*:%s*([%w_%-]+)') do
+    families[name] = true
+  end
+  rename(families, {
+    { '(font%-family%s*:%s*)@([;}])',       '%1@%2' },
+    { '(font%-family%s*=%s*["\'])@(["\'])', '%1@%2' },
+  })
+
+  -- Give the page a styling hook, and the accessibility tree a name. `<title>`
+  -- rather than `role="img"` + `aria-label`, which would hide the very text
+  -- that inlining exists to expose.
+  local head, rest = svg:match('^(<svg[^>]*>)(.*)$')
+  if head then
+    -- Added after the renaming pass, so the hook is a stable page-wide
+    -- selector rather than another namespaced name. A class already on the
+    -- root has been namespaced like any other by this point; keep it and
+    -- append, rather than replacing what the converter put there.
+    local existing = head:match('class%s*=%s*["\']([^"\']*)["\']')
+    if existing then
+      -- Pattern built by concatenation, so only pat_escape here; the
+      -- replacement half still needs rep_escape.
+      head = head:gsub('(class%s*=%s*["\'])' .. pat_escape(existing),
+                       '%1' .. rep_escape(existing) .. ' tikz-svg', 1)
+    else
+      head = head:gsub('^<svg', '<svg class="tikz-svg"', 1)
+    end
+    local title = alt and stringify(alt) or ''
+    if title ~= '' then
+      title = title:gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;')
+      head = head .. '<title>' .. title .. '</title>'
+    end
+    svg = head .. rest
+  end
+  return svg
+end
+
 -- Compile TikZ code to either SVG (default) or PDF (passthrough, used when
 -- the Quarto output format is PDF).
 --
@@ -905,6 +1043,14 @@ local function code_to_figure(conf)
       passthrough = parsed
     end
     if passthrough == nil then passthrough = conf.latex_passthrough end
+
+    -- `embed` decides how a rendered SVG reaches an HTML page. Like
+    -- `latex-passthrough` it is orthogonal to `renderer`: it changes the
+    -- delivery, never the bytes, which is why it stays out of the cache key
+    -- below and why existing cache entries remain valid when it is switched on.
+    local embed = normalize_embed(dgr_opt.opt['embed'], '%%| embed:')
+      or conf.embed or 'img'
+    dgr_opt.opt['embed'] = nil
     -- Keep it out of the cache key: when passthrough is in force nothing is
     -- cached, and when it isn't the flag has no bearing on the rendered image.
     dgr_opt.opt['latex-passthrough'] = nil
@@ -947,11 +1093,7 @@ local function code_to_figure(conf)
     -- browser to render. Only meaningful for HTML-based output (html,
     -- revealjs, etc.); for anything else, warn and drop the block.
     if renderer == 'tikzjax' then
-      local is_html_output =
-        (quarto and quarto.doc and quarto.doc.is_format
-          and quarto.doc.is_format('html:js'))
-        or (FORMAT and FORMAT:match('^html'))
-      if not is_html_output then
+      if not is_html_output() then
         quarto.log.warning(
           "tikz: renderer 'tikzjax' only renders to HTML; dropping block " ..
           "for format '" .. tostring(FORMAT) .. "'. " ..
@@ -1020,6 +1162,32 @@ local function code_to_figure(conf)
 
       -- Cache the image
       cache_image(basename, hash, dgr_opt.opt, imgdata, out_format)
+    end
+
+    -- Inline embedding: hand the SVG to the page as markup instead of
+    -- referencing a file. A browser renders an `<img>`-referenced SVG in
+    -- secure static mode — the document inside is walled off, so its labels
+    -- are unselectable, invisible to find-in-page and to screen readers, and
+    -- unreachable by the page's CSS. Inlining is what makes `svg-engine:
+    -- dvisvgm` worth choosing: its real `<text>` elements only pay off here.
+    --
+    -- Restricted to HTML output. `out_format` is 'svg' for everything that is
+    -- not PDF, docx included, and docx needs a genuine image file. (#27)
+    if embed == 'inline' and out_format == 'svg' and is_html_output() then
+      inline_svg_seq = inline_svg_seq + 1
+      local markup = namespace_svg(imgdata, 'tikz' .. inline_svg_seq, dgr_opt.alt)
+      if markup then
+        local raw = pandoc.RawBlock('html', markup)
+        -- Figure takes Blocks, so a RawBlock plugs in directly — unlike the
+        -- Image below, which is an Inline and needs a Plain.
+        return dgr_opt.caption and
+            pandoc.Figure({ raw }, dgr_opt.caption, dgr_opt['fig-attr']) or
+            raw
+      end
+      quarto.log.warning(
+        "tikz: could not inline figure '" .. basename .. "' (no <svg> root " ..
+        "in the converter's output); falling back to an <img> reference."
+      )
     end
 
     -- Use the block's filename attribute or create a new name by hashing the image content.
@@ -1218,6 +1386,10 @@ local function configure (meta)
   end
   latex_passthrough = latex_passthrough or false
 
+  -- Delivery of the rendered SVG under HTML output: 'img' (default) keeps the
+  -- historical `<img src=…>` reference; 'inline' emits the SVG as markup.
+  local embed = normalize_embed(conf.embed, 'tikz.embed') or 'img'
+
   -- Base URL serving tikzjax.js and fonts.css. Defaults to the canonical
   -- tikzjax.com CDN; users can self-host or pin a fork (e.g. drgrice1's).
   local tikzjax_url = conf['tikzjax-url']
@@ -1240,6 +1412,7 @@ local function configure (meta)
     output_format = out_format,
     renderer = renderer,
     latex_passthrough = latex_passthrough,
+    embed = embed,
     tikzjax_url = tikzjax_url,
   }
 end
@@ -1249,6 +1422,7 @@ end
 -- there and silently drops the whole filter if it finds anything else.
 TIKZ_TEST = {
   canonical_options = canonical_options,
+  namespace_svg = namespace_svg,
   compile_tikz_to_svg = compile_tikz_to_svg,
   write_file = write_file,
   hashable_code = hashable_code,
