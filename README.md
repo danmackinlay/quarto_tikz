@@ -256,6 +256,48 @@ from inside the block instead (`\begin{tikzpicture}[scale=2]`). Sharing styles b
 run's business (the filter's `TEXINPUTS` handling doesn't apply), so
 keep such files next to the `.tex` you compile.
 
+### Inline SVG for HTML
+
+By default a rendered diagram reaches an HTML page as
+`<img src="….svg">`. A browser renders an SVG referenced that way in
+**secure static mode**: the document inside the image is walled off from
+the host page. Diagram labels are not selectable and not findable with
+the browser's find-in-page, screen readers can see no further than
+`alt`, and page CSS cannot reach the diagram at all.
+
+`embed: inline` emits the SVG as markup instead:
+
+```yaml
+tikz:
+  embed: inline
+```
+
+…or per-block with `%%| embed: inline`. It applies only to HTML-family
+output; PDF, docx and the rest keep a real image, and it changes only
+how the SVG is delivered, never the bytes — so switching it on does not
+invalidate a single cache entry.
+
+**This is what makes `svg-engine: dvisvgm` worth choosing.** dvisvgm
+emits real `<text>` elements and embeds fonts as WOFF, where `inkscape`
+and `pdftocairo` outline every glyph to a path. Through an `<img>` that
+advantage is unreachable by construction, so the choice collapses to
+file size. Inlined, the labels become selectable, searchable and
+readable by a screen reader — and `%%| alt:` becomes the SVG's
+`<title>`, an accessible name that does not suppress the text inside it.
+Every `<svg>` also carries `class="tikz-svg"` as a styling hook.
+
+> [!NOTE]
+> Inside an `<img>`, an SVG's `id`s, CSS classes and `@font-face`
+> families are sandboxed. Inlined, they are page-global, and every
+> converter repeats the same names from diagram to diagram — so the
+> filter renames them per diagram before emitting. Without that,
+> `pdftocairo`'s `<use xlink:href="#glyph-0-0">` resolves to the *first*
+> diagram's glyphs (a picture reading "Hello" renders as "W X αα"
+> beside another), and `dvisvgm`'s `text.f0` is redefined per diagram so
+> labels take a later diagram's font and size. Both are silent. If you
+> post-process the emitted SVG yourself, do not assume the names match
+> what the converter wrote.
+
 ## Sharing styles between diagrams
 
 If you have a `\tikzset` or a `\usepackage` block that you want to reuse
@@ -725,6 +767,11 @@ front-matter or `_quarto.yml`):
   document instead of rendering it; `renderer` continues to govern every
   other output format. Independent of `renderer`, so the two can be set
   together. See [LaTeX passthrough](#latex-passthrough).
+- `embed` — string, default `img`. How a rendered SVG reaches an HTML
+  page: `img` (an `<img src=…>` reference) or `inline` (the SVG as
+  markup, with its internal names namespaced per diagram). HTML-family
+  output only; everything else keeps a real image. Does not affect the
+  cache. See [Inline SVG for HTML](#inline-svg-for-html).
 - `tikzjax-url` — string, default `https://tikzjax.com/v1`. Base URL
   for the TikZJax `tikzjax.js` and `fonts.css` assets when
   `renderer: tikzjax`. Override to self-host or pin a fork.
@@ -756,6 +803,8 @@ don't set the same option in both places:
   document-level setting, so a single diagram can be passed through in
   an otherwise compiled document, or compiled in an otherwise
   passed-through one.
+- `embed` — `img` or `inline`. Per-block override of the document-level
+  setting.
 
 Attributes prefixed with `fig-`, `image-`/`img-`, or `opt-` on the code
 block fence are routed to the figure, the image, or the per-block
@@ -893,12 +942,13 @@ build itself succeeds — the missing diagram is your signal.
 
 The filter's pure helpers have unit tests — the `latex-passthrough` comment
 stripping, library-loader matching and move/copy split, the cache-key
-encoding, and the compile failure paths. Run them from the repo root:
+encoding, the compile failure paths, and the inline-SVG namespacing. Run them from the repo root:
 
 ```sh
 pandoc lua tests/test_passthrough.lua
 pandoc lua tests/test_cache_key.lua
 pandoc lua tests/test_errors.lua
+pandoc lua tests/test_inline_svg.lua
 ```
 
 They need nothing beyond `pandoc`, which the extension already requires.
