@@ -56,10 +56,11 @@ figure from prose.
 
 The filter wraps the image in a figure with that caption. This is the
 simplest option and is all you need if you just want a caption under
-the diagram. The figure's `id`/`class` come from `%%| fig-attr:` /
-`label:` / `name:`, but those attributes don't reliably survive
-Quarto's float handling, so a figure made this way is **not
-dependably cross-referenceable** with `@fig-…`.
+the diagram. The figure's `id` and `name` come from `%%| label:` and
+`%%| name:` (and any `fig-`-prefixed directive or fence attribute), but
+those attributes don't reliably survive Quarto's float handling, so a
+figure made this way is **not dependably cross-referenceable** with
+`@fig-…`.
 
 **2. Quarto's native fenced div — for `@fig-…` cross-references.**
 
@@ -398,9 +399,9 @@ warned about, hashes the same as no directive at all. `embed` and
 `latex-passthrough` never reach the key — the first changes only how
 already-rendered bytes are delivered to the page, and under the second
 nothing is cached. What is left in them is presentation: `caption`,
-`alt`, `label`, `name`, `fig-attr`, `filename`. Adding a caption, or
-migrating a block from the deprecated `{.tikz filename='x'}` fence
-attribute to the canonical `%%| filename: x`, therefore leaves the
+`alt`, `label`, `name`, `filename`. Adding a caption, or migrating a
+block from the deprecated `{.tikz filename='x'}` fence attribute to the
+canonical `%%| filename: x`, therefore leaves the
 cache entry intact rather than silently orphaning it. A `ls` of the
 cache directory is therefore enough to tell at a glance which diagram
 in which document each entry came from.
@@ -518,14 +519,14 @@ separately. PRs welcome.
 
 ## Known bugs
 
-Figure attributes set inside the TikZ block (via `%%| fig-attr:`,
-`label:`, `name:`) don't always survive the round-trip into the
-rendered output, so a figure captioned with `%%| caption:` is not
-dependably cross-referenceable. The reliable pattern for `@fig-…`
-references is to wrap the block in a Quarto fenced div instead — see
-[Captions and cross-references](#captions-and-cross-references) above
-for both methods, when to use each, and the figure-in-a-figure pitfall
-to avoid.
+Figure attributes set on a TikZ block (via `%%| label:`, `%%| name:`,
+or a `fig-`-prefixed directive or fence attribute) don't always survive the
+round-trip into the rendered output, so a figure captioned with
+`%%| caption:` is not dependably cross-referenceable. The reliable
+pattern for `@fig-…` references is to wrap the block in a Quarto fenced
+div instead — see [Captions and
+cross-references](#captions-and-cross-references) above for both
+methods, when to use each, and the figure-in-a-figure pitfall to avoid.
 
 
 ## Upgrading from Previous Versions
@@ -599,62 +600,6 @@ independently reached the same conclusion — its Quarto notes tell users
 to use the `%%|` comment-pipe form rather than fence attributes for the
 filename. We go one step further by detecting the conflict and warning
 rather than silently picking one.)
-
-### Figure Attributes Handling
-
-Figure attributes such as `id` and `class` can be set with the
-`fig-attr` option inside the code block:
-
-````markdown
-```{.tikz}
-%%| fig-attr:
-%%|   id: fig-my-diagram
-%%|   class: my-class
-
-% TikZ code
-```
-````
-
-…but attributes set this way don't reliably survive Quarto's float
-handling, so for anything you need to cross-reference, prefer the
-fenced-div pattern. See
-[Captions and cross-references](#captions-and-cross-references) for the
-full picture (both methods, when to use each, and the
-figure-in-a-figure pitfall). The bundled [`example.qmd`](example.qmd)
-uses the fenced-div form:
-
-````
-::: {#fig-example .test-class}
-```{.tikz}
-%%| filename: my-fancy-diagram
-%%| fig-attr:
-%%|   id: fig-my-fancy-diagram
-%%|   class: my-class
-%%| additionalPackages: \usepackage{adjustbox}
-
-\usetikzlibrary{arrows}
-\tikzstyle{int}=[draw, fill=blue!20, minimum size=2em]
-\tikzstyle{init} = [pin edge={to-,thin,black}]
-
-\resizebox{16cm}{!}{%
-  \trimbox{3.5cm 0cm 0cm 0cm}{
-    \begin{tikzpicture}[node distance=2.5cm,auto,>=latex']
-      \node [int, pin={[init]above:$v_0$}] (a) {$\frac{1}{s}$};
-      \node (b) [left of=a,node distance=2cm, coordinate] {a};
-      \node [int, pin={[init]above:$p_0$}] at (0,0) (c)
-        [right of=a] {$\frac{1}{s}$};
-      \node [coordinate] (end) [right of=c, node distance=2cm]{};
-      \path[->] (b) edge node {$a$} (a);
-      \path[->] (a) edge node {$v$} (c);
-      \draw[->] (c) edge node {$p$} (end) ;
-    \end{tikzpicture}
-  }
-}
-```
-
-A fancy TikZ example
-:::
-````
 
 ### Including Additional LaTeX Packages
 
@@ -808,8 +753,8 @@ don't set the same option in both places:
   a reliable cross-reference target — see
   [Captions and cross-references](#captions-and-cross-references).
 - `alt` — image alt text.
-- `fig-attr:` — nested block of Pandoc figure attributes (`id`,
-  `class`, etc.). Not dependably honoured for cross-references; see
+- `label` — the figure's `id`; `name` — the figure's `name`. Not
+  dependably honoured for cross-references; see
   [Captions and cross-references](#captions-and-cross-references).
 - `additionalPackages` — extra `\usepackage{…}` lines added to the
   preamble of the synthesized LaTeX document (under
@@ -959,10 +904,12 @@ build itself succeeds — the missing diagram is your signal.
 
 ## Tests
 
-The filter's pure helpers have unit tests — the `latex-passthrough` comment
-stripping, library-loader matching and move/copy split, the cache-key
-encoding and option resolution, the compile failure paths, and the
-inline-SVG namespacing. Run them all from the repo root:
+The filter's pure helpers have unit tests — the `%%|` directive parser and
+the option router, the `latex-passthrough` library-loader matching and
+move/copy split, the cache-key encoding and option resolution, the compile
+failure paths, and the inline-SVG namespacing. Each suite is a file under
+`tests/`, sharing the assertion helper in `tests/harness.lua`. Run them all
+from the repo root:
 
 ```sh
 sh tests/run.sh

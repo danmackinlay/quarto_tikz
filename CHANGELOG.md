@@ -4,6 +4,61 @@ Notable changes to the `tikz` Quarto extension. Versions are the
 `version:` field in `_extensions/tikz/_extension.yml`, which is what
 `quarto add`/`quarto update` resolves.
 
+## 1.7.0
+
+One option removed, and one `%%|` parser where there were three. No new
+options.
+
+### Fixed
+
+- **`%%| fig-attr:` is gone. It could only ever abort the render.** The nested
+  block was parsed with `pandoc.read(value, 'yaml')`, and `yaml` is not one of
+  pandoc's input formats, so reaching that call raised "Unknown input format
+  'yaml'". It did so from inside option parsing, upstream of the guard added in
+  1.6.0 that keeps one bad diagram from taking the document down, so the whole
+  render died with it. Whether it was reached at all turned on the old key
+  pattern, which required a literal ": " — colon *space*: `%%| fig-attr:` on its
+  own never matched and was silently ignored, while the same line with one
+  trailing space, or with anything after the colon, aborted the build. A feature
+  that has never worked in any form cannot be depended on, so it is removed
+  rather than repaired; the README already pointed anything needing a
+  cross-reference at the fenced-div pattern, which is where it stays. Figure
+  attributes set the other ways — `%%| label:`, `%%| name:`, and `fig-`-prefixed
+  fence attributes — are unaffected.
+- **A directive on the block's last line was silently ignored.** Pandoc strips
+  the trailing newline from a code block, and the option reader's pattern ran to
+  a newline, so a `%%| caption:` or `%%| renderer:` written as the block's final
+  line set nothing at all.
+- **A trailing space made a valid value unknown.** `%%| renderer: latex ` carried
+  its space into the enum lookup, was rejected, and warned about a renderer the
+  user had spelled correctly. Values are trimmed now.
+- **An empty value consistently means "unset".** Whether `%%| header-includes:`
+  recorded an empty string or nothing at all previously turned on invisible
+  trailing whitespace.
+- `%%| key:value` with no space after the colon now parses; the old pattern
+  required a literal ": ".
+- Under `latex-passthrough`, a directive sharing its line with code is no longer
+  emitted verbatim into the shipped `.tex`.
+
+### Changed
+
+- The three `%%|` parsers are now one. The option reader, the cache-key code
+  stripper and the passthrough body preparer each carried their own idea of what
+  a `%%|` line was, and they disagreed — which is what every parsing fix above
+  comes down to. A single pass now answers both questions the filter asks of a
+  block: what the user set, and what code is left once the directives are gone.
+
+  > Upgrading rekeys the cache once for any block whose directive values carry
+  > trailing whitespace, or which relied on the old empty-value behaviour. If
+  > you commit an in-tree `cache-dir`, do that first render on a machine with
+  > TeX.
+
+- The test suites share one assertion helper (`tests/harness.lua`) instead of
+  each carrying its own copy, and a new suite covers the directive parser and
+  the option router.
+- `example.qmd` no longer sets `save-tex` and `tex-dir`, so rendering it leaves
+  no `tikz-tex/` directory behind for anyone who copies its front-matter.
+
 ## 1.6.1
 
 Bug fixes and a refactor pass over the features added in 1.2–1.6; no new
