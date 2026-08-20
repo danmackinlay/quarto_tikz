@@ -165,4 +165,48 @@ check('agreeing sources are not a conflict',
 check('unrelated fence attributes still merge in',
   route({filename = 'demo'}, '', {renderer = 'tikzjax'}).opt.renderer, 'tikzjax')
 
+
+-- The `additionalPackages` alias. It is the one camelCase survivor in an
+-- otherwise kebab-case vocabulary, and the natural spelling used to fall
+-- through the catch-all and become `<img additional-packages="…">`.
+check('the kebab-case spelling is an option, not an image attribute',
+  route({['additional-packages'] = '\\usepackage{x}'}).opt['additional-packages'],
+  '\\usepackage{x}')
+check('…and does not reach the image',
+  route({['additional-packages'] = '\\usepackage{x}'})['image-attr']['additional-packages'],
+  nil)
+check('both spellings land on the same key',
+  route({additionalPackages = '\\usepackage{x}'}).opt['additional-packages'],
+  route({['additional-packages'] = '\\usepackage{x}'}).opt['additional-packages'])
+
+-- A directive naming a document-level option is a mistake with a specific
+-- fix, so it is reported and dropped rather than passed through to the image.
+check('a doc-level option written as a directive is dropped',
+  route({cache = 'true'})['image-attr'].cache, nil)
+check('…and does not become a block option', route({cache = 'true'}).opt.cache, nil)
+
+-- configure: the document-level half, end to end.
+local function conf_for(tikz) return T.configure({ tikz = tikz }) end
+check('an absent option takes its schema default',
+  conf_for({})['tex-engine'], 'pdflatex')
+check('a document-level option is read',
+  conf_for({['tex-engine'] = 'lualatex'})['tex-engine'], 'lualatex')
+check('an unusable enum falls back to the default',
+  conf_for({['svg-engine'] = 'nonsense'})['svg-engine'], 'inkscape')
+-- The bug this consolidation exists for: `save-tex: "false"` was read with
+-- `or false`, and a non-empty string is truthy in Lua, so it switched save-tex
+-- ON. `cache: "true"` was compared with `== true` and did nothing.
+check('save-tex: "false" is false', conf_for({['save-tex'] = 'false'})['save-tex'],
+  false)
+check('save-tex: false is false', conf_for({['save-tex'] = false})['save-tex'], false)
+check('save-tex is off by default', conf_for({})['save-tex'], false)
+check('cache is off by default', conf_for({}).image_cache, nil)
+check('an unparseable cache value does not enable the cache',
+  conf_for({cache = 'bogus'}).image_cache, nil)
+check('the tikzjax url loses its trailing slash',
+  conf_for({['tikzjax-url'] = 'https://example.com/v1/'})['tikzjax-url'],
+  'https://example.com/v1')
+check('a block-scoped option is not read at document level',
+  conf_for({['header-includes'] = '\\relax'})['header-includes'], nil)
+
 t.done()

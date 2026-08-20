@@ -27,7 +27,7 @@ local compile = TIKZ_TEST.compile_tikz_to_svg
 local PIC = '\\begin{tikzpicture}\\draw (0,0);\\end{tikzpicture}'
 
 local data, msg = compile(PIC, {}, {
-  tex_engine = 'tikz-no-such-tex-engine', image_format = 'svg',
+  ['tex-engine'] = 'tikz-no-such-tex-engine', image_format = 'svg',
 }, 'demo')
 check('missing tex engine returns no data', data, nil)
 check('missing tex engine explains itself',
@@ -37,8 +37,8 @@ check('missing tex engine names the engine',
 
 -- `sh` stands in for a TeX engine that exists, so the second check is reached.
 data, msg = compile(PIC, {}, {
-  tex_engine = 'sh', image_format = 'svg',
-  svg_command = {'tikz-no-such-converter', '{input}', '{output}'},
+  ['tex-engine'] = 'sh', image_format = 'svg',
+  ['svg-command'] = {'tikz-no-such-converter', '{input}', '{output}'},
 }, 'demo')
 check('missing svg converter returns no data', data, nil)
 check('missing svg converter names the command',
@@ -46,8 +46,8 @@ check('missing svg converter names the command',
 
 -- For PDF output no converter is needed, so a bogus one must not be checked.
 data, msg = compile(PIC, {}, {
-  tex_engine = 'tikz-no-such-tex-engine', image_format = 'pdf',
-  svg_command = {'tikz-no-such-converter'},
+  ['tex-engine'] = 'tikz-no-such-tex-engine', image_format = 'pdf',
+  ['svg-command'] = {'tikz-no-such-converter'},
 }, 'demo')
 check('pdf output does not require the svg converter',
   msg and msg:find('tikz-no-such-tex-engine', 1, true) ~= nil, true)
@@ -63,25 +63,25 @@ local function joined(conf)
 end
 check('inkscape is the default', (CC({}, FILES)), 'inkscape')
 check('inkscape reads the pdf and writes the svg',
-  joined({svg_engine = 'inkscape'}):find('d.pdf', 1, true) ~= nil, true)
+  joined({['svg-engine'] = 'inkscape'}):find('d.pdf', 1, true) ~= nil, true)
 check('dvisvgm reads the dvi',
-  joined({svg_engine = 'dvisvgm'}):find('d.dvi', 1, true) ~= nil, true)
+  joined({['svg-engine'] = 'dvisvgm'}):find('d.dvi', 1, true) ~= nil, true)
 check('dvisvgm does not read the pdf',
-  joined({svg_engine = 'dvisvgm'}):find('d.pdf', 1, true), nil)
+  joined({['svg-engine'] = 'dvisvgm'}):find('d.pdf', 1, true), nil)
 check('pdftocairo reads the pdf',
-  joined({svg_engine = 'pdftocairo'}), 'pdftocairo -svg d.pdf d.svg')
+  joined({['svg-engine'] = 'pdftocairo'}), 'pdftocairo -svg d.pdf d.svg')
 check('a custom command wins over the engine',
-  (CC({svg_engine = 'dvisvgm', svg_command = {'pdf2svg', '{input}', '{output}'}},
+  (CC({['svg-engine'] = 'dvisvgm', ['svg-command'] = {'pdf2svg', '{input}', '{output}'}},
       FILES)),
   'pdf2svg')
 check('…and its placeholders name the pdf, never the dvi',
-  joined({svg_engine = 'dvisvgm',
-          svg_command = {'pdf2svg', '{input}', '{output}'}}),
+  joined({['svg-engine'] = 'dvisvgm',
+          ['svg-command'] = {'pdf2svg', '{input}', '{output}'}}),
   'pdf2svg d.pdf d.svg')
 -- The substitutions are gsub replacements, so a '%' in a user-supplied
 -- `%%| filename:` must not be read as a capture reference.
 check('a percent in the filename survives substitution',
-  (select(2, CC({svg_command = {'x', '{input}'}},
+  (select(2, CC({['svg-command'] = {'x', '{input}'}},
                 {pdf = '100%.pdf', dvi = 'd.dvi', svg = 'd.svg'})))[1],
   '100%.pdf')
 
@@ -124,16 +124,22 @@ check('memoized probe is stable across calls',
 -- `pandoc lua`, where the `quarto` global does not exist, so every check
 -- below would previously have died with "attempt to index a nil value
 -- (global 'quarto')" — the filter aborting while trying to report a mistake.
-local ok, err = pcall(TIKZ_TEST.normalize_renderer, 'bogus', '%%| renderer:')
+local RO = TIKZ_TEST.read_option
+local ok, err = pcall(RO, 'renderer', 'bogus', '%%| renderer:')
 check('warning path does not raise without quarto', ok, true)
 check('unknown renderer is rejected', err, nil)
-check('known renderer survives',
-  TIKZ_TEST.normalize_renderer('tikzjax', '%%| renderer:'), 'tikzjax')
-ok, err = pcall(TIKZ_TEST.normalize_embed, 'bogus', '%%| embed:')
+check('known renderer survives', RO('renderer', 'tikzjax', '%%| renderer:'),
+  'tikzjax')
+ok, err = pcall(RO, 'embed', 'bogus', '%%| embed:')
 check('embed warning path does not raise without quarto', ok, true)
 check('unknown embed is rejected', err, nil)
 -- The retired renderer name has its own migration warning; same crash before.
-ok = pcall(TIKZ_TEST.normalize_renderer, 'latex-passthrough', 'tikz.renderer')
+ok = pcall(RO, 'renderer', 'latex-passthrough', 'tikz.renderer')
 check('migration warning does not raise without quarto', ok, true)
+-- A boolean and a list travel the same path, so they must survive it too.
+ok = pcall(RO, 'cache', 'perhaps', 'tikz.cache')
+check('boolean warning path does not raise without quarto', ok, true)
+ok = pcall(RO, 'svg-command', '  ', 'tikz.svg-command')
+check('empty-list warning path does not raise without quarto', ok, true)
 
 t.done()
