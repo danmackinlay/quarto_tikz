@@ -60,5 +60,21 @@ data, msg = compile(PIC, {}, {
 check('pdf output does not require the svg converter',
   msg and msg:find('tikz-no-such-tex-engine', 1, true) ~= nil, true)
 
+-- Diagnostics must survive the absence of Quarto. This suite runs under
+-- `pandoc lua`, where the `quarto` global does not exist, so every check
+-- below would previously have died with "attempt to index a nil value
+-- (global 'quarto')" — the filter aborting while trying to report a mistake.
+local ok, err = pcall(TIKZ_TEST.normalize_renderer, 'bogus', '%%| renderer:')
+check('warning path does not raise without quarto', ok, true)
+check('unknown renderer is rejected', err, nil)
+check('known renderer survives',
+  TIKZ_TEST.normalize_renderer('tikzjax', '%%| renderer:'), 'tikzjax')
+ok, err = pcall(TIKZ_TEST.normalize_embed, 'bogus', '%%| embed:')
+check('embed warning path does not raise without quarto', ok, true)
+check('unknown embed is rejected', err, nil)
+-- The retired renderer name has its own migration warning; same crash before.
+ok = pcall(TIKZ_TEST.normalize_renderer, 'latex-passthrough', 'tikz.renderer')
+check('migration warning does not raise without quarto', ok, true)
+
 print(('%d checks, %d failures'):format(checks, failures))
 os.exit(failures == 0 and 0 or 1)

@@ -35,6 +35,46 @@ local function write_file (filepath, content)
   return true
 end
 
+-- Diagnostics. Quarto supplies `quarto.log`; plain pandoc does not, and this
+-- filter is meant to work under both — `is_html_output` and `build_texinputs`
+-- each carry an explicit plain-pandoc fallback. Diagnostics did not: every
+-- `quarto.log.*` call site was unguarded, so under `pandoc --lua-filter` the
+-- *first warning of any kind* aborted the filter with "attempt to index a nil
+-- value (global 'quarto')" — including the warning that was trying to explain
+-- a mistake in the user's own document.
+--
+-- Resolved per call rather than once at load time, because a host may install
+-- the global after the chunk is loaded.
+local function logger(level, prefix)
+  return function(message)
+    local sink = quarto and quarto.log and quarto.log[level]
+    if sink then return sink(message) end
+    io.stderr:write(prefix, ' (tikz.lua): ', tostring(message), '\n')
+  end
+end
+
+local log = {
+  warning = logger('warning', 'WARNING'),
+  error = logger('error', 'ERROR'),
+}
+
+-- Add text to the host document's header. Two callers need this — the
+-- latex-passthrough preamble and the TikZJax asset tags — and each used to
+-- carry its own copy of the same fallback warning. `what` names the payload
+-- so the message can say which one could not be hoisted.
+local function include_in_header(text, what)
+  if quarto and quarto.doc and quarto.doc.include_text then
+    quarto.doc.include_text('in-header', text)
+    return true
+  end
+  log.warning(
+    "tikz: cannot add " .. what .. " to the document header automatically — " ..
+    "quarto.doc.include_text unavailable. Add the following to your " ..
+    "include-in-header manually:\n" .. text
+  )
+  return false
+end
+
 -- Function to check if a command exists
 local function check_dependency(cmd)
   local handle = io.popen("command -v " .. cmd .. " 2>/dev/null")
@@ -118,7 +158,7 @@ local function normalize_renderer(value, where)
   local name = stringify(value)
   if KNOWN_RENDERERS[name] then return name end
   if name == 'latex-passthrough' then
-    quarto.log.warning(
+    log.warning(
       "tikz: " .. where .. " no longer takes 'latex-passthrough'. It is now a " ..
       "separate option, because it decides whether a block is rendered at all " ..
       "rather than how: set `latex-passthrough: true` and leave `renderer` " ..
@@ -126,7 +166,7 @@ local function normalize_renderer(value, where)
     )
     return nil
   end
-  quarto.log.warning(
+  log.warning(
     "tikz: unknown " .. where .. " '" .. name .. "' — falling back to 'latex'. " ..
     "Supported values: latex, tikzjax."
   )
@@ -141,7 +181,7 @@ local function normalize_embed(value, where)
   if value == nil then return nil end
   local name = stringify(value)
   if KNOWN_EMBEDS[name] then return name end
-  quarto.log.warning(
+  log.warning(
     "tikz: unknown " .. where .. " '" .. name .. "' — falling back to 'img'. " ..
     "Supported values: img, inline."
   )
@@ -161,7 +201,7 @@ local function diagram_options(cb)
     if attribs[key] == nil then
       attribs[key] = value
     elseif attribs[key] ~= value then
-      quarto.log.warning(
+      log.warning(
         "tikz: '" .. key .. "' is set both as a code-block fence " ..
         "attribute (" .. tostring(value) .. ") and via the canonical " ..
         "%%| " .. key .. ": directive (" .. tostring(attribs[key]) ..
@@ -350,16 +390,7 @@ local function flush_passthrough_preamble()
     for _, text in ipairs(bucket) do parts[#parts + 1] = text end
   end
   if #parts == 0 then return end
-  local text = table.concat(parts, '\n')
-  if quarto and quarto.doc and quarto.doc.include_text then
-    quarto.doc.include_text('in-header', text)
-  else
-    quarto.log.warning(
-      "tikz: cannot hoist preamble text automatically — " ..
-      "quarto.doc.include_text unavailable. Add the following to your " ..
-      "include-in-header manually:\n" .. text
-    )
-  end
+  include_in_header(table.concat(parts, '\n'), 'the latex-passthrough preamble')
 end
 
 -- Treat an empty attribute (pandoc gives an unlabelled block `identifier = ''`)
@@ -612,7 +643,7 @@ local function embed_latex_passthrough(code, user_opts, basename)
     hoist(PASSTHROUGH_LIBRARIES, text)
   end
   if #warns > 0 then
-    quarto.log.warning(
+    log.warning(
       "tikz: renderer 'latex-passthrough', block '" .. tostring(basename) ..
       "': the following could not be hoisted into the preamble. A library " ..
       "loaded in the body of a captioned block is scoped to its `figure` " ..
@@ -634,15 +665,7 @@ local function inject_tikzjax_assets(conf)
     '<script src="%s/tikzjax.js"></script>',
     url, url
   )
-  if quarto and quarto.doc and quarto.doc.include_text then
-    quarto.doc.include_text('in-header', html)
-  else
-    quarto.log.warning(
-      "tikz: cannot inject TikZJax assets automatically — " ..
-      "quarto.doc.include_text unavailable. Add the following to your " ..
-      "include-in-header manually:\n" .. html
-    )
-  end
+  include_in_header(html, 'the TikZJax assets')
 end
 
 -- Build a `<script type="text/tikz">` block for client-side rendering by
@@ -1035,7 +1058,7 @@ local function code_to_figure(conf)
     if passthrough ~= nil then
       local parsed = truthy(passthrough)
       if parsed == nil then
-        quarto.log.warning(
+        log.warning(
           "tikz: %%| latex-passthrough: expects true or false, got '" ..
           stringify(passthrough) .. "'. Ignoring it."
         )
@@ -1094,7 +1117,7 @@ local function code_to_figure(conf)
     -- revealjs, etc.); for anything else, warn and drop the block.
     if renderer == 'tikzjax' then
       if not is_html_output() then
-        quarto.log.warning(
+        log.warning(
           "tikz: renderer 'tikzjax' only renders to HTML; dropping block " ..
           "for format '" .. tostring(FORMAT) .. "'. " ..
           "Set renderer: latex (or remove the override) to render this " ..
@@ -1150,7 +1173,7 @@ local function code_to_figure(conf)
         failure = extra or "no image data was produced"
       end
       if failure then
-        quarto.log.error(
+        log.error(
           "tikz: could not render figure '" .. basename .. "', leaving the " ..
           "block unrendered.\n" .. failure
         )
@@ -1184,7 +1207,7 @@ local function code_to_figure(conf)
             pandoc.Figure({ raw }, dgr_opt.caption, dgr_opt['fig-attr']) or
             raw
       end
-      quarto.log.warning(
+      log.warning(
         "tikz: could not inline figure '" .. basename .. "' (no <svg> root " ..
         "in the converter's output); falling back to an <img> reference."
       )
@@ -1278,7 +1301,7 @@ local function configure (meta)
   if save_tex then
     if image_cache then
       -- Both cache and save-tex are enabled; raise a warning and disable save-tex
-      quarto.log.warning("Both 'cache' and 'save-tex' are enabled. Disabling 'save-tex' since caching is active.")
+      log.warning("Both 'cache' and 'save-tex' are enabled. Disabling 'save-tex' since caching is active.")
       save_tex = false
     else
       tex_dir = conf['tex-dir']
@@ -1301,7 +1324,7 @@ local function configure (meta)
     local tex_template_path = absolutize(pandoc.utils.stringify(tex_template))
     tex_template_content = read_file(tex_template_path)
     if not tex_template_content then
-      quarto.log.error(
+      log.error(
         "tikz: tex-template not found: " .. tostring(tex_template_path) ..
         " — falling back to the default template."
       )
@@ -1325,7 +1348,7 @@ local function configure (meta)
   svg_engine = svg_engine and pandoc.utils.stringify(svg_engine) or 'inkscape'
   local supported = { inkscape = true, dvisvgm = true, pdftocairo = true }
   if not supported[svg_engine] then
-    quarto.log.warning(
+    log.warning(
       "tikz: unknown svg-engine '" .. svg_engine ..
       "' — falling back to inkscape. Supported values: inkscape, dvisvgm, pdftocairo."
     )
@@ -1357,14 +1380,14 @@ local function configure (meta)
     if #parts > 0 then
       svg_command = parts
     else
-      quarto.log.warning("tikz: svg-command is empty; ignoring.")
+      log.warning("tikz: svg-command is empty; ignoring.")
     end
   end
 
   -- Output format: 'pdf' when the Quarto output format is PDF, otherwise
   -- 'svg'. Drives whether we run the SVG engine or embed the PDF directly.
   local out_format = 'svg'
-  if quarto and quarto.doc and quarto.doc.isFormat and quarto.doc.isFormat('pdf') then
+  if quarto and quarto.doc and quarto.doc.is_format and quarto.doc.is_format('pdf') then
     out_format = 'pdf'
   end
 
@@ -1379,7 +1402,7 @@ local function configure (meta)
   -- every other output format. Per-block %%| latex-passthrough: … overrides.
   local latex_passthrough = truthy(conf['latex-passthrough'])
   if latex_passthrough == nil and conf['latex-passthrough'] ~= nil then
-    quarto.log.warning(
+    log.warning(
       "tikz: latex-passthrough expects true or false, got '" ..
       stringify(conf['latex-passthrough']) .. "'. Treating it as false."
     )
@@ -1428,6 +1451,8 @@ TIKZ_TEST = {
   hashable_code = hashable_code,
   code_part = code_part,
   match_loader_line = match_loader_line,
+  normalize_renderer = normalize_renderer,
+  normalize_embed = normalize_embed,
   split_libs = split_libs,
   prepare_passthrough_body = prepare_passthrough_body,
 }
