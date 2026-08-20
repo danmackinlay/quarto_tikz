@@ -101,3 +101,54 @@ The same source can be rendered client-side by [TikZJax](https://github.com/arti
   \draw (0,-1.2) -- (0,1.2);
 \end{tikzpicture}
 ```
+## Inline SVG (`embed: inline`)
+
+By default a rendered diagram reaches the page as `<img src="….svg">`, and a
+browser renders SVG referenced that way in secure static mode: the labels are
+unselectable, invisible to find-in-page and to screen readers, and unreachable
+by the page's CSS. `%%| embed: inline` emits the SVG as markup instead, so the
+text below is real text you can select — try it.
+
+This is what makes `svg-engine: dvisvgm` worth choosing: it emits real
+`<text>` elements, and through an `<img>` that advantage is invisible. Set
+`tikz: {svg-engine: dvisvgm}` in the front-matter to see the difference.
+
+```{.tikz}
+%%| embed: inline
+%%| alt: A labelled triangle
+%%| caption: Inlined, so its labels are selectable text
+
+\begin{tikzpicture}[scale=1.5]
+  \coordinate [label=below left:$A$]  (a) at (0,0);
+  \coordinate [label=below right:$B$] (b) at (2,0);
+  \coordinate [label=above:$C$]       (c) at (1,1.5);
+  \draw (a) -- (b) -- (c) -- cycle;
+\end{tikzpicture}
+```
+
+## LaTeX passthrough
+
+`latex-passthrough` hands the TikZ source to the host document rather than
+compiling it to an image, so the diagram is typeset by the same LaTeX run as
+the surrounding text — matching fonts and sizing for free, and producing no
+figure files at all. It applies only when the output really is LaTeX, so
+under this document's `format: html` the block below renders through the
+normal SVG pipeline; render to `format: pdf` and the TikZ source is emitted
+into the `.tex` instead.
+
+Note that `\usetikzlibrary` is written in the block body as usual: the filter
+hoists it into the host preamble, because a library loaded inside the
+`figure` environment a captioned block becomes would be scoped to that
+environment while PGF recorded the load globally — silently breaking a later
+block.
+
+```{.tikz}
+%%| latex-passthrough: true
+%%| caption: Typeset by the host document under PDF output
+
+\usetikzlibrary{arrows.meta}
+\begin{tikzpicture}[scale=1.5]
+  \draw[-{Stealth[length=3mm]}] (0,0) -- (2,0) node[midway, above] {$x$};
+  \draw[-{Stealth[length=3mm]}] (0,0) -- (0,1.5) node[midway, left] {$y$};
+\end{tikzpicture}
+```

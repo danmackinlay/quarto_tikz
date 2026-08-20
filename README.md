@@ -413,7 +413,7 @@ change every cache filename at once. Length-prefixing matters because it
 is what keeps two different option sets from encoding to the same string.
 
 > [!NOTE]
-> **Upgrading to 1.5.0 rekeys the cache once.** Both changes above — the
+> **Upgrading to 1.5.0 rekeyed the cache once.** Both changes above — the
 > canonical encoding and dropping directive lines from the code hash —
 > alter every filename, so the first render after upgrading recompiles
 > every diagram and writes new entries; the old ones are orphaned and
@@ -421,6 +421,10 @@ is what keeps two different option sets from encoding to the same string.
 > in-tree `cache-dir`, do that render on a machine that has TeX, and
 > expect one large diff; a TeX-less build host would otherwise fail on
 > the first build after the upgrade.
+>
+> The same applies to 1.6.1 for any block carrying a `%%| renderer:`
+> directive, whose entry moves to the key it should have had all along.
+> See [CHANGELOG.md](CHANGELOG.md).
 
 You can override the location with `tikz.cache-dir: <path>`. For
 solo local development, the default user-level cache is the
