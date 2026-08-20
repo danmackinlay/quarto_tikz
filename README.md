@@ -343,9 +343,36 @@ Cache files are named `<basename>.<short-hash>.<ext>` (e.g.
 `%%| filename:` directive (or `tikz` if you didn't set one), and the
 short hash is derived from the TikZ code plus per-block options, the
 TeX engine, the SVG engine, the template, and the output format —
-toggling any of those produces a different cache file. A `ls` of the
+toggling any of those produces a different cache file.
+
+The code half of the hash has the `%%|` directive lines removed first.
+They are TeX comments, so they cannot change a rendered byte, and the
+ones that *do* influence compilation — `additionalPackages`,
+`header-includes`, `renderer`, `opt-*` — are folded into the options
+half separately. What is left in them is presentation: `caption`,
+`alt`, `label`, `name`, `fig-attr`, `filename`. Adding a caption, or
+migrating a block from the deprecated `{.tikz filename='x'}` fence
+attribute to the canonical `%%| filename: x`, therefore leaves the
+cache entry intact rather than silently orphaning it. A `ls` of the
 cache directory is therefore enough to tell at a glance which diagram
 in which document each entry came from.
+
+The hash is computed from a canonical encoding of those inputs — keys
+sorted, and each key and value length-prefixed. Sorting matters because
+Lua leaves table iteration order unspecified: it is stable for any given
+build, but a pandoc upgrade that hashes keys differently would otherwise
+change every cache filename at once. Length-prefixing matters because it
+is what keeps two different option sets from encoding to the same string.
+
+> [!NOTE]
+> **Upgrading to 1.5.0 rekeys the cache once.** Both changes above — the
+> canonical encoding and dropping directive lines from the code hash —
+> alter every filename, so the first render after upgrading recompiles
+> every diagram and writes new entries; the old ones are orphaned and
+> harmless. Delete the cache directory to tidy up. If you commit an
+> in-tree `cache-dir`, do that render on a machine that has TeX, and
+> expect one large diff; a TeX-less build host would otherwise fail on
+> the first build after the upgrade.
 
 You can override the location with `tikz.cache-dir: <path>`. For
 solo local development, the default user-level cache is the
@@ -857,12 +884,13 @@ build itself succeeds — the missing diagram is your signal.
 
 ## Tests
 
-The pure helpers behind `latex-passthrough` — comment stripping,
-library-loader matching, and the move/copy split — have unit tests. Run them
-from the repo root:
+The filter's pure helpers have unit tests — the `latex-passthrough` comment
+stripping, library-loader matching and move/copy split, and the cache-key
+encoding. Run them from the repo root:
 
 ```sh
 pandoc lua tests/test_passthrough.lua
+pandoc lua tests/test_cache_key.lua
 ```
 
 They need nothing beyond `pandoc`, which the extension already requires.
