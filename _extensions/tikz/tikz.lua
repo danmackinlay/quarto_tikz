@@ -159,15 +159,71 @@ end
 
 local tikzjax_assets_injected = false  -- Guards once-per-document injection of TikZJax JS/CSS.
 
--- Function to parse properties from code comments
-local function properties_from_code (code, comment_start)
-  local props = {}
-  local pattern = comment_start:gsub('%p', '%%%1') .. '| ?' ..
-    '([-_%w]+): ([^\n]*)\n'
-  for key, value in code:gmatch(pattern) do
-    props[key] = value
+-- Split a string into lines, dropping the trailing empty element that a
+-- final newline would otherwise produce.
+local function split_lines(s)
+  local lines = {}
+  for line in (s .. '\n'):gmatch('([^\n]*)\n') do
+    lines[#lines + 1] = line
   end
-  return props
+  if lines[#lines] == '' then table.remove(lines) end
+  return lines
+end
+
+-- One pass over a block's lines, answering both questions the filter asks
+-- about `%%|` directives: what did the user set, and what is left once the
+-- directives are gone. Returns the directives as a key -> value table, and the
+-- code with every directive stripped.
+--
+-- That second value is what the compiler is handed, what the cache key is
+-- taken over, and what the generated basename hashes. Dropping directives
+-- before any of those is what keeps a presentation edit out of the cache key:
+-- `%%|` lines are TeX comments, so removing them cannot change a rendered
+-- byte, while every directive that does influence compilation is folded into
+-- the options half of the key separately. Without it, captioning a diagram
+-- re-keyed an image that had not changed — invisible locally, fatal on a
+-- TeX-less build host rendering from a committed cache. (#28)
+--
+-- This used to be three parsers with three different ideas of what a `%%|`
+-- line is, and they disagreed:
+--
+--   * `properties_from_code` ran a single `gmatch` over the whole string for
+--     "| key: value\n". Pandoc strips the trailing newline from a CodeBlock,
+--     so a directive on the block's *last line* never matched and was
+--     silently ignored.
+--   * `hashable_code` walked lines and handled that case explicitly, with a
+--     test pinning it — so the same line was a directive to the cache key and
+--     not a directive to the option reader.
+--   * `prepare_passthrough_body` had a third rule, `^%s*%%%%|`, which kept a
+--     mid-line directive verbatim and emitted it into the shipped `.tex`.
+--
+-- Stripping now follows one rule everywhere: a directive truncates its line,
+-- and a line left blank by the truncation is dropped, so an indented directive
+-- and an absent one leave the same code behind.
+--
+-- Recognising a directive is deliberately separate from stripping one: a line
+-- carrying `%%|` is always stripped, whether or not what follows parses as a
+-- key. That is what lets a stale nested block (the old `fig-attr` form) vanish
+-- from the code without its sub-lines being resurrected as stray options.
+--
+-- The value is trimmed and an empty one means unset. Both fall out of having
+-- one parser: the old pattern required a literal ": " and ran to end of line,
+-- so `%%| renderer: latex ` carried its trailing space into an enum lookup and
+-- was rejected as unknown, while whether `%%| header-includes:` recorded an
+-- empty string or nothing at all turned on invisible trailing whitespace.
+local function split_directives(code)
+  local props, kept = {}, {}
+  for _, line in ipairs(split_lines(code)) do
+    local before, directive = line:match('^(.-)%%%%|(.*)$')
+    if not before then
+      kept[#kept + 1] = line
+    else
+      local key, value = directive:match('^ ?([-_%w]+):%s*(.-)%s*$')
+      if key and value ~= '' then props[key] = value end
+      if not before:match('^%s*$') then kept[#kept + 1] = before end
+    end
+  end
+  return props, table.concat(kept, '\n')
 end
 
 -- The rendering pipelines. Both are total: either can serve any output format
@@ -261,15 +317,18 @@ local BLOCK_OPTIONS = {
   ['latex-passthrough'] = 'latex-passthrough',
 }
 
--- Function to process code block attributes and options
-local function diagram_options(cb)
-  -- The `%%| key: value` comment directives are the canonical, current
-  -- syntax (and match Quarto's cell-options convention). Code-block fence
-  -- attributes (`{.tikz filename=…}`) are the deprecated pre-1.0 form. When
-  -- a key is given both ways, the %%| directive wins; we only let a fence
-  -- attribute through if the %%| form didn't set that key, and we warn on
-  -- any genuine conflict so the silent override becomes visible.
-  local attribs = properties_from_code(cb.text, '%%')
+-- Route a block's options to the things that consume them. `attribs` is the
+-- directive table from `split_directives`, which this mutates by merging the
+-- fence attributes in — it is built fresh per block, so there is nothing to
+-- alias.
+--
+-- The `%%| key: value` comment directives are the canonical, current syntax
+-- (and match Quarto's cell-options convention). Code-block fence attributes
+-- (`{.tikz filename=…}`) are the deprecated pre-1.0 form. When a key is given
+-- both ways, the %%| directive wins; we only let a fence attribute through if
+-- the %%| form didn't set that key, and we warn on any genuine conflict so the
+-- silent override becomes visible.
+local function diagram_options(cb, attribs)
   for key, value in pairs(cb.attributes) do
     if attribs[key] == nil then
       attribs[key] = value
@@ -459,45 +518,6 @@ local function blank_to_nil(s)
   return s
 end
 
--- Split a string into lines, dropping the trailing empty element that a
--- final newline would otherwise produce.
-local function split_lines(s)
-  local lines = {}
-  for line in (s .. '\n'):gmatch('([^\n]*)\n') do
-    lines[#lines + 1] = line
-  end
-  if lines[#lines] == '' then table.remove(lines) end
-  return lines
-end
-
--- The block text as it matters to the *compiler*, with the `%%|` directives
--- removed. Used for the cache key and for the generated basename, never for
--- what is actually compiled.
---
--- `%%|` lines are TeX comments, so dropping them cannot change a rendered
--- byte, and every directive that does influence compilation — additionalPackages,
--- header-includes, renderer, opt-* — is folded into the options half of the key
--- separately by `diagram_options`. What is left in them is presentation:
--- caption, alt, label, name, fig-attr, filename. Hashing those meant that
--- captioning a diagram, or migrating a block from the deprecated
--- `{.tikz filename='x'}` fence attribute to the canonical `%%| filename: x`,
--- silently re-keyed a cache entry whose image had not changed — invisible
--- locally, fatal on a TeX-less build host rendering from a committed cache. (#28)
---
--- A directive sharing a line with code truncates that line rather than removing
--- it; a line left blank by the removal is dropped, so an indented directive and
--- an absent one agree.
-local function hashable_code(code)
-  local out = {}
-  for _, line in ipairs(split_lines(code)) do
-    local kept = line:gsub('%%%%|.*$', '')
-    if kept == line or not kept:match('^%s*$') then
-      out[#out + 1] = kept
-    end
-  end
-  return table.concat(out, '\n')
-end
-
 -- The library loaders we know how to hoist. All are idempotent — PGF records
 -- "already loaded" globally — which is what lets us *copy* one into the
 -- preamble and leave the body copy in place as a no-op.
@@ -603,8 +623,10 @@ local function picture_markers(line)
 end
 
 -- Prepare a block body for passthrough: hoist the library loads into the host
--- preamble and drop the `%%|` option directives (they are filter input, not
--- LaTeX). Returns the preamble lines, the remaining body, and any warnings.
+-- preamble. The `%%|` option directives are already gone — `split_directives`
+-- removes them before any renderer sees the code, so this no longer carries
+-- its own third opinion about what one looks like. Returns the preamble lines,
+-- the remaining body, and any warnings.
 --
 -- Two passes, because how a load is written decides what we may do with it:
 --
@@ -651,7 +673,7 @@ local function prepare_passthrough_body(code)
       for _, name in ipairs(split_libs(arg)) do
         preamble[#preamble + 1] = '\\' .. macro .. '{' .. name .. '}'
       end
-    elseif not line:match('^%s*%%%%|') then
+    else
       -- Kept, including a loader inside a picture: pass 2 sees it and warns.
       body[#body + 1] = line
     end
@@ -1216,8 +1238,11 @@ local function code_to_figure(conf)
       return nil
     end
 
-    -- Get options from code block
-    local dgr_opt = diagram_options(block)
+    -- Parse the block once. `code` is the text with every `%%|` directive
+    -- stripped: what the renderers compile, and — as `hash` below — what the
+    -- cache key and the generated basename are taken over.
+    local directives, code = split_directives(block.text)
+    local dgr_opt = diagram_options(block, directives)
     local renderer, passthrough, embed, key_opts = resolve_axes(dgr_opt.opt, conf)
     -- The other half of the split: what the renderers read. Only
     -- `additional-packages` and `header-includes` are consulted, so the
@@ -1235,7 +1260,7 @@ local function code_to_figure(conf)
     -- to a LaTeX build, not fall into tikzjax's drop-for-non-HTML rule.
     if passthrough and conf.host_is_latex then
       local raw = embed_latex_passthrough(
-        block.text, compile_opts,
+        code, compile_opts,
         dgr_opt.filename or blank_to_nil(dgr_opt['fig-attr'].id) or '<unnamed>'
       )
       return as_figure(raw, dgr_opt)
@@ -1254,12 +1279,12 @@ local function code_to_figure(conf)
         )
         return {}  -- remove the block from the output entirely
       end
-      return as_figure(embed_tikzjax(block.text, compile_opts, conf), dgr_opt)
+      return as_figure(embed_tikzjax(code, compile_opts, conf), dgr_opt)
     end
 
-    -- The block text as it matters to the compiler: the basis for both the
-    -- generated basename and the cache key, so the two cannot drift apart.
-    local hash = hashable_code(block.text)
+    -- The stripped code is the basis for both the generated basename and the
+    -- cache key, so the two cannot drift apart.
+    local hash = code
     local basename = dgr_opt.filename or pandoc.sha1(hash)
 
     -- Check if image is cached
@@ -1284,7 +1309,7 @@ local function code_to_figure(conf)
       -- through. On a build host without TeX that turns a failed publish
       -- into a cosmetic gap. (#30)
       local ok, result, extra = pcall(function()
-        return compile_tikz_to_svg(block.text, compile_opts, conf, basename)
+        return compile_tikz_to_svg(code, compile_opts, conf, basename)
       end)
       local failure
       if not ok then
@@ -1586,7 +1611,8 @@ TIKZ_TEST = {
   namespace_svg = namespace_svg,
   compile_tikz_to_svg = compile_tikz_to_svg,
   write_file = write_file,
-  hashable_code = hashable_code,
+  split_directives = split_directives,
+  diagram_options = diagram_options,
   code_part = code_part,
   match_loader_line = match_loader_line,
   meta_string = meta_string,

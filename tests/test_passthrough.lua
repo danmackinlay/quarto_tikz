@@ -115,9 +115,12 @@ check('load after a closed picture is hoisted',
 check('usepackage warns', warn_count('\\usepackage{amsmath}\n\\relax'), 1)
 check('usepackage not hoisted', preamble_of('\\usepackage{amsmath}\n\\relax'), '')
 
--- %%| directives are filter input, not LaTeX.
+-- %%| directives are filter input, not LaTeX. They are removed upstream by
+-- `split_directives`, so a prepared body never sees one — this function used
+-- to carry a third, differently-spelled rule of its own.
+local function stripped(code) return (select(2, T.split_directives(code))) end
 check('directives stripped',
-  body_of('%%| caption: hi\n%%|   id: fig-x\n\\begin{tikzpicture}\n\\end{tikzpicture}'),
+  body_of(stripped('%%| caption: hi\n%%|   id: fig-x\n\\begin{tikzpicture}\n\\end{tikzpicture}')),
   '\\begin{tikzpicture}\n\\end{tikzpicture}')
 -- A commented-out load is neither hoisted nor warned about.
 check('commented load ignored',

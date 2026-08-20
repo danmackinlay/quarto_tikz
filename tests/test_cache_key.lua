@@ -51,7 +51,7 @@ check('empty options', C({}), '')
 -- hashable_code: `%%| directives are presentation or are folded into the
 -- options separately, and are TeX comments either way, so they must not
 -- reach the hash. Everything else must survive untouched. (#28)
-local H = TIKZ_TEST.hashable_code
+local function H(code) return (select(2, TIKZ_TEST.split_directives(code))) end
 local PIC = '\\begin{tikzpicture}\n  \\draw (0,0) -- (1,1);\n\\end{tikzpicture}'
 
 check('directive line removed', H('%%| filename: demo\n' .. PIC), PIC)
