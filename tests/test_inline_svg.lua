@@ -73,5 +73,28 @@ local kept = N([[<svg class="keep"></svg>]], 'n')
 check('existing root class is namespaced', has(kept, 'keep-n'), true)
 check('hook appended alongside it', has(kept, 'class="keep-n tikz-svg"'), true)
 
+-- as_figure: every renderer ends the same way. Three produce a RawBlock,
+-- which Figure takes directly; the <img> path produces an Image, which is an
+-- Inline and needs a Plain around it. Four copies of this used to say so
+-- separately.
+local F = TIKZ_TEST.as_figure
+local RAW = pandoc.RawBlock('html', '<svg/>')
+local IMG = pandoc.Image({}, 'x.svg')
+local CAP = pandoc.read('A caption.', 'markdown').blocks
+
+check('uncaptioned raw block is emitted bare',
+  F(RAW, {caption = nil, ['fig-attr'] = {}}).t, 'RawBlock')
+check('uncaptioned image is wrapped in a Plain',
+  F(IMG, {caption = nil, ['fig-attr'] = {}}).t, 'Plain')
+local fig = F(RAW, {caption = CAP, ['fig-attr'] = {id = 'fig-x'}})
+check('captioned raw block becomes a Figure', fig.t, 'Figure')
+check('…carrying the fig-attr id', fig.identifier, 'fig-x')
+check('…and the caption', pandoc.utils.stringify(fig.caption), 'A caption.')
+check('…with the raw block as its content', fig.content[1].t, 'RawBlock')
+fig = F(IMG, {caption = CAP, ['fig-attr'] = {id = 'fig-y'}})
+check('captioned image becomes a Figure', fig.t, 'Figure')
+check('…with the image inside a Plain', fig.content[1].t, 'Plain')
+check('…still an Image within it', fig.content[1].content[1].t, 'Image')
+
 print(('%d checks, %d failures'):format(checks, failures))
 os.exit(failures == 0 and 0 or 1)

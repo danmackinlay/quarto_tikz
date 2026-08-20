@@ -80,5 +80,98 @@ check('code is otherwise untouched', H(PIC), PIC)
 check('a blank line in the code is preserved',
   H('\\relax\n\n\\relax'), '\\relax\n\n\\relax')
 
+-- resolve_axes: an option that resolves to its default must leave the cache
+-- key untouched, however it was spelled. `embed` and `latex-passthrough`
+-- already did; `renderer` wrote only in the non-default branch and so let
+-- `diagram_options`' raw directive text survive into the key. A no-op
+-- `%%| renderer: latex` then produced a second cache entry for a
+-- byte-identical image, and an unknown value that had already been warned
+-- about and discarded produced a third. (#28 again, by another route.)
+local R = TIKZ_TEST.resolve_axes
+local CONF = {['tex_engine'] = 'pdflatex', ['svg_engine'] = 'inkscape'}
+local function key_for(user_opt)
+  local _, _, _, key_opts = R(user_opt, CONF)
+  return C(key_opts)
+end
+
+local bare = key_for({})
+check('no directives', key_for({}), bare)
+check('an explicit default renderer does not re-key',
+  key_for({renderer = 'latex'}), bare)
+check('a rejected renderer does not re-key',
+  key_for({renderer = 'bogus'}), bare)
+check('an explicit default embed does not re-key',
+  key_for({embed = 'img'}), bare)
+check('a non-default embed does not re-key (delivery only)',
+  key_for({embed = 'inline'}), bare)
+check('a rejected embed does not re-key', key_for({embed = 'bogus'}), bare)
+check('latex-passthrough does not re-key',
+  key_for({['latex-passthrough'] = 'true'}), bare)
+
+-- …but a renderer that really does change the bytes still must.
+check('a non-default renderer re-keys',
+  key_for({renderer = 'tikzjax'}) ~= bare, true)
+-- …as must every option that reaches the compiler.
+check('additionalPackages still re-keys',
+  key_for({['additional-packages'] = '\\usepackage{x}'}) ~= bare, true)
+check('header-includes still re-keys',
+  key_for({['header-includes'] = '\\relax'}) ~= bare, true)
+check('an opt-* passthrough still re-keys', key_for({scale = '2'}) ~= bare, true)
+
+-- Doc-level settings that change the bytes are folded in too.
+check('the tex engine is in the key',
+  C(select(4, R({}, {tex_engine = 'lualatex', svg_engine = 'inkscape'}))) ~= bare,
+  true)
+check('the svg engine is in the key',
+  C(select(4, R({}, {tex_engine = 'pdflatex', svg_engine = 'dvisvgm'}))) ~= bare,
+  true)
+check('the template is in the key',
+  C(select(4, R({}, {tex_engine = 'pdflatex', svg_engine = 'inkscape',
+                     tex_template_content = '\\documentclass{article}'}))) ~= bare,
+  true)
+
+-- resolve_axes must not write back into the caller's table: the same table is
+-- handed to the renderers as compile options.
+local shared = {renderer = 'latex', embed = 'inline'}
+R(shared, CONF)
+check('the caller\'s option table is left alone', shared.renderer, 'latex')
+check('…including the delivery axis', shared.embed, 'inline')
+
+-- The resolved values themselves.
+local renderer, passthrough, embed = R({}, CONF)
+check('renderer defaults to latex', renderer, 'latex')
+check('passthrough defaults to nil/false', not passthrough, true)
+check('embed defaults to img', embed, 'img')
+renderer, passthrough, embed = R({renderer = 'tikzjax', embed = 'inline',
+                                  ['latex-passthrough'] = 'yes'}, CONF)
+check('renderer directive honoured', renderer, 'tikzjax')
+check('embed directive honoured', embed, 'inline')
+check('passthrough directive honoured', passthrough, true)
+check('doc-level renderer applies when the block is silent',
+  (R({}, {renderer = 'tikzjax'})), 'tikzjax')
+check('a rejected block renderer falls back to the doc level, not to latex',
+  (R({renderer = 'bogus'}, {renderer = 'tikzjax'})), 'tikzjax')
+
+-- Document-level option reading. Metadata never arrives as a plain Lua
+-- string, so each of these used to repeat `x and stringify(x) or default`.
+local MS, ME = TIKZ_TEST.meta_string, TIKZ_TEST.meta_enum
+check('an absent option takes the default', MS({}, 'tex-engine', 'pdflatex'),
+  'pdflatex')
+check('a present option wins', MS({['tex-engine'] = 'lualatex'}, 'tex-engine',
+  'pdflatex'), 'lualatex')
+check('an explicitly empty option is not absent',
+  MS({['tex-engine'] = ''}, 'tex-engine', 'pdflatex'), '')
+check('a nil default is returned as nil', MS({}, 'tex-template', nil), nil)
+
+local ENGINES = {inkscape = true, dvisvgm = true, pdftocairo = true}
+check('an absent enum takes the default',
+  ME({}, 'svg-engine', ENGINES, 'inkscape', 'inkscape, dvisvgm'), 'inkscape')
+check('a known enum value is kept',
+  ME({['svg-engine'] = 'dvisvgm'}, 'svg-engine', ENGINES, 'inkscape',
+     'inkscape, dvisvgm'), 'dvisvgm')
+check('an unknown enum value warns and takes the default',
+  ME({['svg-engine'] = 'nonsense'}, 'svg-engine', ENGINES, 'inkscape',
+     'inkscape, dvisvgm'), 'inkscape')
+
 print(('%d checks, %d failures'):format(checks, failures))
 os.exit(failures == 0 and 0 or 1)

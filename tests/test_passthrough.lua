@@ -91,6 +91,30 @@ check('load inside a picture is not hoisted',
   preamble_of('\\begin{tikzpicture}\n\\node {\\usetikzlibrary{a}};\n\\end{tikzpicture}'), '')
 check('load inside a picture warns',
   warn_count('\\begin{tikzpicture}\n\\node {\\usetikzlibrary{a}};\n\\end{tikzpicture}'), 1)
+-- …including when it is alone on its line. Pass 1 used to move this one
+-- before any depth was known, so the one construct the function promises to
+-- leave alone was the one it silently rewrote — and multi-line node content
+-- is exactly where moving it changes the drawing:
+--     \\node {
+--     \\usetikzlibrary{arrows}
+--     };
+local IN_PIC = '\\begin{tikzpicture}\n\\usetikzlibrary{arrows}\n' ..
+  '\\draw (0,0) -- (1,1);\n\\end{tikzpicture}'
+check('an own-line load inside a picture is not hoisted',
+  preamble_of(IN_PIC), '')
+check('an own-line load inside a picture stays in the body',
+  body_of(IN_PIC), IN_PIC)
+check('an own-line load inside a picture warns', warn_count(IN_PIC), 1)
+-- A picture that opens and closes on one line must not leave depth stuck.
+check('a load after a one-line picture is still hoisted',
+  preamble_of('\\begin{tikzpicture}\\draw (0,0);\\end{tikzpicture}\n' ..
+              '\\usetikzlibrary{arrows}'),
+  '\\usetikzlibrary{arrows}')
+check('a load before any picture is hoisted',
+  preamble_of('\\usetikzlibrary{arrows}\n' ..
+              '\\begin{tikzpicture}\\draw (0,0);\\end{tikzpicture}'),
+  '\\usetikzlibrary{arrows}')
+
 check('load after a closed picture is hoisted',
   preamble_of('\\begin{tikzpicture}\\end{tikzpicture}\n\\usetikzlibrary{a} \\relax'),
   '\\usetikzlibrary{a}')

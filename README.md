@@ -391,7 +391,13 @@ The code half of the hash has the `%%|` directive lines removed first.
 They are TeX comments, so they cannot change a rendered byte, and the
 ones that *do* influence compilation — `additionalPackages`,
 `header-includes`, `renderer`, `opt-*` — are folded into the options
-half separately. What is left in them is presentation: `caption`,
+half separately, as the values they *resolve to* rather than as the text
+you wrote. So an option that resolves to its default is invisible to the
+key: a no-op `%%| renderer: latex`, or a value the filter rejected and
+warned about, hashes the same as no directive at all. `embed` and
+`latex-passthrough` never reach the key — the first changes only how
+already-rendered bytes are delivered to the page, and under the second
+nothing is cached. What is left in them is presentation: `caption`,
 `alt`, `label`, `name`, `fig-attr`, `filename`. Adding a caption, or
 migrating a block from the deprecated `{.tikz filename='x'}` fence
 attribute to the canonical `%%| filename: x`, therefore leaves the
@@ -407,7 +413,7 @@ change every cache filename at once. Length-prefixing matters because it
 is what keeps two different option sets from encoding to the same string.
 
 > [!NOTE]
-> **Upgrading to 1.5.0 rekeys the cache once.** Both changes above — the
+> **Upgrading to 1.5.0 rekeyed the cache once.** Both changes above — the
 > canonical encoding and dropping directive lines from the code hash —
 > alter every filename, so the first render after upgrading recompiles
 > every diagram and writes new entries; the old ones are orphaned and
@@ -415,6 +421,10 @@ is what keeps two different option sets from encoding to the same string.
 > in-tree `cache-dir`, do that render on a machine that has TeX, and
 > expect one large diff; a TeX-less build host would otherwise fail on
 > the first build after the upgrade.
+>
+> The same applies to 1.6.1 for any block carrying a `%%| renderer:`
+> directive, whose entry moves to the key it should have had all along.
+> See [CHANGELOG.md](CHANGELOG.md).
 
 You can override the location with `tikz.cache-dir: <path>`. For
 solo local development, the default user-level cache is the
@@ -678,6 +688,10 @@ The options choosing *which* binary runs — `tikz.tex-engine`,
 document/project metadata, never from per-block attributes or `%%|`
 directives, so a hostile diagram *body* alone can't run a command.
 
+Those programs are launched directly (`pandoc.pipe`), never through a
+shell, so a value like `svg-engine: "x; rm -rf ~"` names a program that
+does not exist rather than a pipeline that runs.
+
 **Don't render untrusted documents.** Metadata is trusted input: an
 attacker controlling the YAML front-matter can point `svg-command` at
 any program. Separately, TeX can shell out via `\write18` if
@@ -741,7 +755,10 @@ front-matter or `_quarto.yml`):
   element is the executable; subsequent elements are arguments, with
   `{input}` and `{output}` substituted with the intermediate PDF and
   the target SVG paths respectively. When set, `svg-command` takes
-  precedence over `svg-engine`.
+  precedence over `svg-engine` — setting both warns, and `svg-engine`
+  is ignored. In particular `{input}` is always a PDF: a custom command
+  cannot consume the DVI that `svg-engine: dvisvgm` would otherwise ask
+  the TeX engine for.
 
   Two YAML forms are accepted; prefer the list form if any path may
   contain whitespace:
@@ -760,8 +777,10 @@ front-matter or `_quarto.yml`):
 - `renderer` — string, default `latex`. Picks the rendering pipeline:
   `latex` (server-side `tex-engine` + `svg-engine` chain above) or
   `tikzjax` (client-side WebAssembly rendering, HTML output only). See
-  [Renderers](#renderers). An unrecognized value warns and falls back to
-  `latex`.
+  [Renderers](#renderers). An unrecognized value warns and is ignored, so
+  the next source down applies — for a `%%|` directive that is the
+  document-level `renderer`, and for the document-level setting it is the
+  `latex` default. The same holds for `embed`.
 - `latex-passthrough` — boolean, default `false`. Under LaTeX output
   (`format: pdf` or `format: latex`), emit the TikZ source into the host
   document instead of rendering it; `renderer` continues to govern every
@@ -942,16 +961,19 @@ build itself succeeds — the missing diagram is your signal.
 
 The filter's pure helpers have unit tests — the `latex-passthrough` comment
 stripping, library-loader matching and move/copy split, the cache-key
-encoding, the compile failure paths, and the inline-SVG namespacing. Run them from the repo root:
+encoding and option resolution, the compile failure paths, and the
+inline-SVG namespacing. Run them all from the repo root:
 
 ```sh
-pandoc lua tests/test_passthrough.lua
-pandoc lua tests/test_cache_key.lua
-pandoc lua tests/test_errors.lua
-pandoc lua tests/test_inline_svg.lua
+sh tests/run.sh
 ```
 
-They need nothing beyond `pandoc`, which the extension already requires.
+…or one at a time, e.g. `pandoc lua tests/test_cache_key.lua`.
+
+They need nothing beyond `pandoc`, which the extension already requires: no
+TeX distribution and no SVG converter. That is what lets CI
+(`.github/workflows/test.yml`) run them on every push and pull request
+without installing TeX Live.
 
 ## Credits
 

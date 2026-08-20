@@ -1,0 +1,21 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lua-suites:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The suites run under `pandoc lua`, so pandoc is the only dependency.
+      # No TeX distribution and no SVG converter: everything under tests/
+      # exercises the pure helpers and the failure paths.
+      - uses: pandoc/actions/setup@v1
+        with:
+          version: '3.1.11'
+
+      - run: sh tests/run.sh
