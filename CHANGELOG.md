@@ -4,6 +4,127 @@ Notable changes to the `tikz` Quarto extension. Versions are the
 `version:` field in `_extensions/tikz/_extension.yml`, which is what
 `quarto add`/`quarto update` resolves.
 
+## 1.7.0
+
+One option removed, and one `%%|` parser where there were three. No new
+options.
+
+### Fixed
+
+- **`%%| fig-attr:` is gone. It could only ever abort the render.** The nested
+  block was parsed with `pandoc.read(value, 'yaml')`, and `yaml` is not one of
+  pandoc's input formats, so reaching that call raised "Unknown input format
+  'yaml'". It did so from inside option parsing, upstream of the guard added in
+  1.6.0 that keeps one bad diagram from taking the document down, so the whole
+  render died with it. Whether it was reached at all turned on the old key
+  pattern, which required a literal ": " — colon *space*: `%%| fig-attr:` on its
+  own never matched and was silently ignored, while the same line with one
+  trailing space, or with anything after the colon, aborted the build. A feature
+  that has never worked in any form cannot be depended on, so it is removed
+  rather than repaired; the README already pointed anything needing a
+  cross-reference at the fenced-div pattern, which is where it stays. Figure
+  attributes set the other ways — `%%| label:`, `%%| name:`, and `fig-`-prefixed
+  fence attributes — are unaffected.
+- **`format: pdf` with `svg-engine: dvisvgm` failed every diagram.** Under
+  LaTeX output the TeX run's own PDF is embedded directly and no converter
+  runs, but the DVI request was still keyed off `svg-engine` — so the TeX
+  engine was asked for a DVI and the filter then read a PDF nothing had
+  written. `svg-engine` correctly has no effect under LaTeX output now.
+- **Two diagrams could share one image file.** Only the cache folded a
+  block's options into the filename it wrote; the mediabag entry and the
+  `save-tex` directory used the code hash alone. Two blocks with identical
+  TikZ and different options — or sharing an explicit `%%| filename:` —
+  therefore collapsed onto one file, and the block rendered first displayed
+  the other one's diagram. All three now share one name, derived from the
+  code and the options together.
+- **`embed: inline` mis-namespaced some stylesheets.** A grouped CSS selector
+  (`.f0, .f1 {`) was skipped while the `class=` attributes it applied to were
+  still renamed, silently detaching the style; an element carrying more than
+  one class (`class="f0 bold"`) was not namespaced at all, so two diagrams on
+  a page could still collide through it. A `<svg …/>` with no content put its
+  `<title>` outside the element, and an attribute value containing `>` had the
+  `<title>` spliced into the middle of it.
+- **`svg-command` accepted a command it could not run.** Only emptiness was
+  checked, so a single-word `svg-command: pdf2svg` was accepted and then run
+  with no PDF to read and nowhere to write. It must now name both `{input}`
+  and `{output}`.
+- **A relative `tex-template:` path could fail to resolve.** Paths were made
+  absolute against `$PWD`, which is a shell convention rather than something
+  every launcher exports; the fallback when it was missing produced exactly
+  the relative path that resolution exists to prevent.
+- **A directive on the block's last line was silently ignored.** Pandoc strips
+  the trailing newline from a code block, and the option reader's pattern ran to
+  a newline, so a `%%| caption:` or `%%| renderer:` written as the block's final
+  line set nothing at all.
+- **A trailing space made a valid value unknown.** `%%| renderer: latex ` carried
+  its space into the enum lookup, was rejected, and warned about a renderer the
+  user had spelled correctly. Values are trimmed now.
+- **An empty value consistently means "unset".** Whether `%%| header-includes:`
+  recorded an empty string or nothing at all previously turned on invisible
+  trailing whitespace.
+- `%%| key:value` with no space after the colon now parses; the old pattern
+  required a literal ": ".
+- Under `latex-passthrough`, a directive sharing its line with code is no longer
+  emitted verbatim into the shipped `.tex`.
+
+- **A quoted boolean meant different things at different levels.** Options
+  were read five different ways depending on where they were written, so
+  `cache: "true"` was compared with `== true` and silently ignored, while
+  `save-tex: "false"` was compared for Lua truthiness — where a non-empty
+  string is true — and silently switched `save-tex` *on*. Only
+  `latex-passthrough` parsed its value properly. All options now read
+  `true`/`false`, `yes`/`no` and `1`/`0` alike, quoted or not, and anything
+  else warns instead of being guessed at.
+- **`%%| additional-packages:` was not an option.** The kebab-case spelling —
+  the natural one, in a vocabulary that is otherwise entirely kebab-case —
+  fell through to the image-attribute catch-all and became
+  `<img additional-packages="\usepackage{…}">`. Both it and
+  `additionalPackages` are accepted now.
+- Diagnostics that list an option's permitted values take them from the
+  option's own declaration, so a message can no longer disagree with the set
+  it describes.
+
+### Changed
+
+- Every option is declared once — type, default, scope, permitted values —
+  and read through a single reader, replacing five mechanisms that each
+  applied to a different subset. Each of the three fixes above is a
+  consequence of that rather than a patch on top of it.
+- **An unrecognised `%%|` directive now warns.** It is still passed through as
+  an image attribute, so nothing that worked stops working, but a typo
+  (`%%| capton:`) says so instead of appearing in the output as
+  `<img capton="…">`. A directive naming a document-level option — `%%| cache:
+  true` — is reported and ignored, since it never had an effect there. Fence
+  attributes are unaffected: an arbitrary image attribute is what they are for.
+- Generated image filenames change shape, from a bare 40-character SHA1 to
+  the `<label>.<short-hash>.<ext>` form the cache has used since 1.2.1 — so
+  `my-fancy-diagram.53efa4b1.svg` rather than `8cd4809a63b4….svg`. This is
+  what fixes the collision above; it also means a mediabag or `save-tex`
+  listing says which diagram produced each file, as a cache listing already
+  did.
+- The three `%%|` parsers are now one. The option reader, the cache-key code
+  stripper and the passthrough body preparer each carried their own idea of what
+  a `%%|` line was, and they disagreed — which is what every parsing fix above
+  comes down to. A single pass now answers both questions the filter asks of a
+  block: what the user set, and what code is left once the directives are gone.
+
+  > Upgrading rekeys the cache once for any block whose directive values carry
+  > trailing whitespace, or which relied on the old empty-value behaviour. If
+  > you commit an in-tree `cache-dir`, do that first render on a machine with
+  > TeX.
+
+- Inlined SVGs are namespaced in one pass per rewrite rather than one per
+  name, which also removed the pattern-escaping the old approach needed:
+  22.0 ms to 3.7 ms on a 69 KB `pdftocairo` SVG.
+- The test suites share one assertion helper (`tests/harness.lua`) instead of
+  each carrying its own copy, and two new suites cover the directive parser,
+  the option router and the document-level configuration. 154 checks to 276.
+- Source comments no longer retell incidents the CHANGELOG already records;
+  what remains is the reasoning a maintainer would otherwise have to
+  rediscover.
+- `example.qmd` no longer sets `save-tex` and `tex-dir`, so rendering it leaves
+  no `tikz-tex/` directory behind for anyone who copies its front-matter.
+
 ## 1.6.1
 
 Bug fixes and a refactor pass over the features added in 1.2–1.6; no new

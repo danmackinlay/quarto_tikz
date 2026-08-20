@@ -83,19 +83,10 @@ end
 -- but not Inkscape, a project with fifty diagrams should report a missing
 -- converter fifty times without running LaTeX fifty times first.
 --
--- What it replaces is `io.popen("command -v " .. cmd .. " 2>/dev/null")`,
--- which had three problems:
---
---   * It interpolated a metadata-controlled string into a shell command, so
---     `tex-engine` could name a pipeline rather than a program. Everywhere
---     else the filter runs external programs through `pandoc.pipe`, which
---     execs directly with no shell in between.
---   * `command -v` is a POSIX shell builtin. Under `cmd.exe` it is not a
---     command at all, so the probe always came back empty and *every*
---     Windows render reported "pdflatex not found on PATH" — despite the
---     Windows handling in `cachedir` and `build_texinputs`.
---   * It spawned a subprocess per diagram to answer a question whose answer
---     cannot change during a render.
+-- Searched here rather than by asking a shell. `cmd` is metadata-controlled,
+-- so it must never be interpolated into a shell command; `command -v` is a
+-- POSIX builtin and does not exist under `cmd.exe`; and a subprocess per
+-- diagram answers a question whose answer cannot change during a render.
 local function readable(path)
   local fh = io.open(path, 'rb')
   if not fh then return false end
@@ -157,38 +148,79 @@ local function cachedir ()
   return cache_dir
 end
 
-local tikzjax_assets_injected = false  -- Guards once-per-document injection of TikZJax JS/CSS.
+-- State belonging to one document, cleared at the top of the walk.
+--
+-- The filter is normally one process per render, so nothing here used to be
+-- reset. A host that applied it to two documents in one process would have
+-- carried the TikZJax guard, the hoisted preamble and the inline-SVG counter
+-- from the first into the second — the second document silently losing its
+-- `<script>` tags. Cheap to make correct, and gathering them says what their
+-- lifetime is rather than leaving it to be inferred.
+--
+-- `executable_seen` above is deliberately *not* here: it caches what is on
+-- PATH, which no document can change.
+local doc_state
+local function reset_document_state()
+  doc_state = {
+    tikzjax_assets_injected = false,  -- Once-per-document TikZJax JS/CSS.
+    -- Preamble text hoisted by latex-passthrough, in three ordered buckets and
+    -- flushed once at the end of the walk. Bucket order rather than encounter
+    -- order guarantees a `\usepackage{pgfplots}` from one block precedes a
+    -- `\usepgfplotslibrary{…}` hoisted out of another.
+    passthrough_preamble = { {}, {}, {} },
+    passthrough_header_seen = {},     -- Text already queued, so we emit it once.
+    inline_svg_seq = 0,               -- Namespaces each inlined SVG on the page.
+  }
+end
+reset_document_state()
 
--- Function to parse properties from code comments
-local function properties_from_code (code, comment_start)
-  local props = {}
-  local pattern = comment_start:gsub('%p', '%%%1') .. '| ?' ..
-    '([-_%w]+): ([^\n]*)\n'
-  for key, value in code:gmatch(pattern) do
-    if key == 'fig-attr' then
-      -- Handle nested attributes for fig-attr
-      local attr_value = ''
-      local subpattern = comment_start:gsub('%p', '%%%1') .. '|   ([^\n]+)\n'
-      for subvalue in code:gmatch(subpattern) do
-        attr_value = attr_value .. subvalue .. '\n'
-      end
-      -- Parse the YAML-like subattributes
-      local parsed = pandoc.read(attr_value, 'yaml').blocks
-      if #parsed > 0 then
-        props[key] = pandoc.utils.block_to_lua(parsed[1])
-      end
-    else
-      props[key] = value
-    end
+-- Split a string into lines, dropping the trailing empty element that a
+-- final newline would otherwise produce.
+local function split_lines(s)
+  local lines = {}
+  for line in (s .. '\n'):gmatch('([^\n]*)\n') do
+    lines[#lines + 1] = line
   end
-  return props
+  if lines[#lines] == '' then table.remove(lines) end
+  return lines
 end
 
--- The rendering pipelines. Both are total: either can serve any output format
--- it supports, and neither needs to know about the other. Whether a block is
--- handed to the host LaTeX document instead of being rendered at all is a
--- separate axis — see `latex-passthrough` below.
-local KNOWN_RENDERERS = { latex = true, tikzjax = true }
+-- One pass over a block's lines, answering both questions the filter asks
+-- about `%%|` directives: what did the user set, and what is left once the
+-- directives are gone. Returns the directives as a key -> value table, and the
+-- code with every directive stripped.
+--
+-- That second value is what the compiler is handed, what the cache key is
+-- taken over, and what the generated basename hashes. Dropping directives
+-- before any of those is what keeps a presentation edit out of the cache key:
+-- `%%|` lines are TeX comments, so removing them cannot change a rendered
+-- byte, while every directive that does influence compilation is folded into
+-- the options half of the key separately. (#28)
+--
+-- Stripping follows one rule: a directive truncates its line, and a line left
+-- blank by the truncation is dropped, so an indented directive and an absent
+-- one leave the same code behind.
+--
+-- Recognising a directive is deliberately separate from stripping one. A line
+-- carrying `%%|` is always stripped, whether or not what follows parses as a
+-- key — which is what stops the sub-lines of a stale nested block reappearing
+-- as stray options.
+--
+-- A value is trimmed, and an empty one means unset.
+local function split_directives(code)
+  local props, kept = {}, {}
+  for _, line in ipairs(split_lines(code)) do
+    local before, directive = line:match('^(.-)%%%%|(.*)$')
+    if not before then
+      kept[#kept + 1] = line
+    else
+      local key, value = directive:match('^ ?([-_%w]+):%s*(.-)%s*$')
+      if key and value ~= '' then props[key] = value end
+      if not before:match('^%s*$') then kept[#kept + 1] = before end
+    end
+  end
+  return props, table.concat(kept, '\n')
+end
 
 -- Coerce an option that may arrive as a YAML boolean (from document metadata)
 -- or as a string (a `%%|` directive is always text) into a Lua boolean.
@@ -203,87 +235,205 @@ local function truthy(value)
   return nil
 end
 
--- How a rendered SVG reaches an HTML page: as an `<img src=…>` reference
--- (the default) or as inline markup.
-local KNOWN_EMBEDS = { img = true, inline = true }
-
--- PDF/DVI → SVG converters we know how to drive. `tikz.svg-command` is the
--- escape hatch for anything else; see `convert_command`.
-local KNOWN_SVG_ENGINES = { inkscape = true, dvisvgm = true, pdftocairo = true }
-
--- Validate an option against its known values. Returns the value when it is
--- recognized and nil otherwise, so an unusable setting falls through to the
--- caller's next source: block directive → document metadata → built-in
--- default. `where` names the source for the message ("tikz.renderer",
--- "%%| embed:").
+-- Every option the filter accepts, declared once.
 --
--- The message deliberately does not name the value it is falling back *to*.
--- It used to — "falling back to 'latex'", "falling back to 'img'" — but the
--- fallback belongs to the caller's chain, not to this function. With
--- `tikz: {renderer: tikzjax}` in the front-matter and a block-level
+-- There used to be five ways to read one, and which applied depended on where
+-- the option was written rather than on what it meant: `normalize_enum` plus a
+-- wrapper per enum for block-level values, `meta_string` / `meta_enum` for the
+-- document-level half, `truthy` for one boolean, and bare Lua truthiness for
+-- two more. So the same YAML meant different things at different levels:
+--
+--   cache: "true"               compared with `== true`  -> silently ignored
+--   save-tex: "false"           compared with `or false` -> silently ENABLED
+--   latex-passthrough: "false"  parsed by `truthy`       -> correctly false
+--
+-- Fields:
+--   type    'string' | 'bool' | 'enum' | 'list'
+--   values  for enums, in the order the diagnostic should list them — which
+--           is also what the diagnostic uses, so the message cannot drift
+--           from the set it describes. It already had: the supported-values
+--           strings were typed by hand beside the tables they described.
+--   scope   'doc' (the `tikz:` metadata block), 'block' (a `%%|` directive),
+--           or 'both'. Lets a directive naming a document-level option say so
+--           instead of falling through to the image-attribute catch-all.
+--   alias   an additional accepted spelling.
+--   retired a value that used to be accepted, mapped to the explanation.
+local OPTIONS = {
+  ['cache']       = { type = 'bool',   scope = 'doc', default = false },
+  ['cache-dir']   = { type = 'string', scope = 'doc' },
+  ['save-tex']    = { type = 'bool',   scope = 'doc', default = false },
+  ['tex-dir']     = { type = 'string', scope = 'doc', default = 'tikz-tex' },
+  ['tex-template'] = { type = 'string', scope = 'doc' },
+  -- Anything naming an executable on PATH is accepted: pdflatex (the
+  -- historical default), lualatex and xelatex for fontspec or complex
+  -- Unicode scripts, or any other TeX engine.
+  ['tex-engine']  = { type = 'string', scope = 'doc', default = 'pdflatex' },
+  -- inkscape and pdftocairo consume the PDF the TeX run produces; dvisvgm
+  -- consumes a DVI (which is why `pipeline_for` has to ask for one) and
+  -- embeds fonts as WOFF, keeping text in the rendered SVG selectable.
+  ['svg-engine']  = { type = 'enum',   scope = 'doc', default = 'inkscape',
+                      values = { 'inkscape', 'dvisvgm', 'pdftocairo' } },
+  -- Escape hatch for wiring any external converter (pdf2svg, a pymupdf
+  -- script, mutool, …) without us blessing each by name. Two YAML forms:
+  --   svg-command: "mytool {input} {output}"        whitespace-tokenized
+  --   svg-command: [mytool, "{input}", "{output}"]  preferred if a path may
+  --                                                 contain spaces
+  -- `{input}` expands to the intermediate PDF, `{output}` to the target SVG.
+  -- Takes precedence over svg-engine; see `convert_command`.
+  ['svg-command'] = { type = 'list',   scope = 'doc',
+                      -- A command that names neither placeholder would be run
+                      -- with no PDF to read and would write nothing we could
+                      -- find; a one-element `svg-command` did exactly that.
+                      validate = function(parts)
+                        local joined = table.concat(parts, ' ')
+                        for _, ph in ipairs { '{input}', '{output}' } do
+                          if not joined:find(ph, 1, true) then
+                            return "it never mentions " .. ph
+                          end
+                        end
+                      end },
+  -- Base URL serving tikzjax.js and fonts.css: the canonical CDN by default,
+  -- overridden to self-host or to pin a fork.
+  ['tikzjax-url'] = { type = 'string', scope = 'doc',
+                      default = 'https://tikzjax.com/v1' },
+  -- How a block is drawn when we have to draw it. Both pipelines are total:
+  -- either can serve any output format it supports, and neither needs to know
+  -- about the other.
+  ['renderer']    = { type = 'enum',   scope = 'both', default = 'latex',
+                      values = { 'latex', 'tikzjax' },
+                      retired = { ['latex-passthrough'] =
+                        "It is now a separate option, because it decides whether a " ..
+                        "block is rendered at all rather than how: set " ..
+                        "`latex-passthrough: true` and leave `renderer` saying how the " ..
+                        "block should be drawn on non-LaTeX outputs." } },
+  -- How a rendered SVG reaches an HTML page: as an `<img src=…>` reference,
+  -- or as inline markup. Changes the delivery, never the bytes.
+  ['embed']       = { type = 'enum',   scope = 'both', default = 'img',
+                      values = { 'img', 'inline' } },
+  -- Whether to draw the block at all: under LaTeX output the host document
+  -- can typeset the picture itself, so we hand over the source.
+  ['latex-passthrough'] = { type = 'bool', scope = 'both', default = false },
+  ['additional-packages'] = { type = 'string', scope = 'block',
+                              alias = 'additionalPackages' },
+  ['header-includes']     = { type = 'string', scope = 'block' },
+}
+
+-- Every spelling that names an option, mapped to its canonical name.
+-- `additionalPackages` is the lone camelCase survivor in an otherwise
+-- kebab-case vocabulary; accepting both stops the natural spelling falling
+-- through to the image-attribute catch-all, where `%%| additional-packages:`
+-- silently became `<img additional-packages="\usepackage{…}">`.
+local OPTION_NAMES = {}
+for name, spec in pairs(OPTIONS) do
+  OPTION_NAMES[name] = name
+  if spec.alias then OPTION_NAMES[spec.alias] = name end
+end
+
+-- Coerce and validate one value against its schema entry. Returns nil when the
+-- value is absent or unusable, so the caller's chain — block directive, then
+-- document metadata, then the built-in default — carries on to the next source.
+--
+-- `where` names the source for diagnostics ('%%| renderer:', 'tikz.renderer').
+-- The message deliberately does not name the value being fallen back *to*:
+-- that belongs to the caller's chain, not here. It used to, and with
+-- `tikz: {renderer: tikzjax}` in the front-matter plus a block-level
 -- `%%| renderer: bogus`, the user was told they got latex and actually got
 -- tikzjax.
-local function normalize_enum(value, known, where, supported)
-  if value == nil then return nil end
-  local name = stringify(value)
-  if known[name] then return name end
-  -- What happens next depends on where the value came from: a `%%|`
-  -- directive falls through to the document-level setting, a document-level
-  -- setting to the built-in default. Naming a specific value here is what
-  -- made the old message wrong — it said "falling back to 'latex'" even when
-  -- the document had asked for tikzjax.
+local function read_option(name, value, where)
+  local spec = OPTIONS[name]
+  if spec == nil or value == nil then return nil end
+
+  -- What happens after a rejected value depends on where it came from: a
+  -- directive falls through to the document setting, a document setting to
+  -- the built-in default.
   local consequence = where:match('^tikz%.')
     and "the built-in default is used"
     or "the document-level setting applies (or the default, if there is none)"
-  log.warning(
-    "tikz: unknown " .. where .. " '" .. name .. "' — ignoring it, so " ..
-    consequence .. ". Supported values: " .. supported .. "."
-  )
-  return nil
-end
 
--- Renderer names, plus the migration for the one that used to be spelled
--- as a renderer and is now its own option.
-local function normalize_renderer(value, where)
-  if value ~= nil and stringify(value) == 'latex-passthrough' then
-    log.warning(
-      "tikz: " .. where .. " no longer takes 'latex-passthrough'. It is now a " ..
-      "separate option, because it decides whether a block is rendered at all " ..
-      "rather than how: set `latex-passthrough: true` and leave `renderer` " ..
-      "saying how the block should be drawn on non-LaTeX outputs. Ignoring it."
-    )
+  if spec.type == 'bool' then
+    local parsed = truthy(value)
+    if parsed == nil then
+      log.warning(
+        "tikz: " .. where .. " expects true or false, got '" ..
+        stringify(value) .. "' — ignoring it, so " .. consequence .. "."
+      )
+    end
+    return parsed
+  end
+
+  if spec.type == 'list' then
+    local parts = {}
+    if pandoc.utils.type(value) == 'List' then
+      for _, item in ipairs(value) do parts[#parts + 1] = stringify(item) end
+    else
+      for word in stringify(value):gmatch('%S+') do parts[#parts + 1] = word end
+    end
+    if #parts == 0 then
+      log.warning("tikz: " .. where .. " is empty — ignoring it, so " ..
+        consequence .. ".")
+      return nil
+    end
+    local problem = spec.validate and spec.validate(parts)
+    if problem then
+      log.warning("tikz: " .. where .. " is unusable — " .. problem ..
+        ". Ignoring it, so " .. consequence .. ".")
+      return nil
+    end
+    return parts
+  end
+
+  local s = stringify(value)
+
+  if spec.type == 'enum' then
+    for _, known in ipairs(spec.values) do
+      if s == known then return s end
+    end
+    local retired = spec.retired and spec.retired[s]
+    if retired then
+      log.warning("tikz: " .. where .. " no longer takes '" .. s .. "'. " ..
+        retired .. " Ignoring it.")
+    else
+      log.warning(
+        "tikz: unknown " .. where .. " '" .. s .. "' — ignoring it, so " ..
+        consequence .. ". Supported values: " ..
+        table.concat(spec.values, ', ') .. "."
+      )
+    end
     return nil
   end
-  return normalize_enum(value, KNOWN_RENDERERS, where, 'latex, tikzjax')
+
+  return s
 end
 
-local function normalize_embed(value, where)
-  return normalize_enum(value, KNOWN_EMBEDS, where, 'img, inline')
+-- Resolve one option through its whole chain: the block directive, then the
+-- document-level value (already read and defaulted into `conf`), then the
+-- built-in default.
+local function resolve_option(name, user_opt, conf)
+  local value = read_option(name, user_opt[name], '%%| ' .. name .. ':')
+  if value ~= nil then return value end
+  if conf[name] ~= nil then return conf[name] end
+  return OPTIONS[name].default
 end
 
--- Per-block options, mapping the directive name a user writes to the key the
--- renderers read. Every one of these must be listed: the catch-all at the end
--- of the loop below turns an unrecognized attribute into an *image*
--- attribute, so anything omitted here silently becomes `<img embed="inline">`
--- rather than an option. Two of the entries used to be `elseif` branches
--- whose only content was a comment saying exactly that.
-local BLOCK_OPTIONS = {
-  additionalPackages = 'additional-packages',
-  ['header-includes'] = 'header-includes',
-  renderer = 'renderer',
-  embed = 'embed',
-  ['latex-passthrough'] = 'latex-passthrough',
-}
+-- Route a block's options to the things that consume them. `attribs` is the
+-- directive table from `split_directives`, which this mutates by merging the
+-- fence attributes in — it is built fresh per block, so there is nothing to
+-- alias.
+--
+-- The `%%| key: value` comment directives are the canonical, current syntax
+-- (and match Quarto's cell-options convention). Code-block fence attributes
+-- (`{.tikz filename=…}`) are the deprecated pre-1.0 form. When a key is given
+-- both ways, the %%| directive wins; we only let a fence attribute through if
+-- the %%| form didn't set that key, and we warn on any genuine conflict so the
+-- silent override becomes visible.
+local function diagram_options(cb, attribs)
+  -- Which keys the user wrote as `%%|` directives, captured before the fence
+  -- attributes are merged in. Only these are held to the option vocabulary: a
+  -- fence attribute is *allowed* to be an arbitrary image attribute, which is
+  -- what the catch-all at the end of the routing loop is for.
+  local from_directive = {}
+  for key in pairs(attribs) do from_directive[key] = true end
 
--- Function to process code block attributes and options
-local function diagram_options(cb)
-  -- The `%%| key: value` comment directives are the canonical, current
-  -- syntax (and match Quarto's cell-options convention). Code-block fence
-  -- attributes (`{.tikz filename=…}`) are the deprecated pre-1.0 form. When
-  -- a key is given both ways, the %%| directive wins; we only let a fence
-  -- attribute through if the %%| form didn't set that key, and we warn on
-  -- any genuine conflict so the silent override becomes visible.
-  local attribs = properties_from_code(cb.text, '%%')
   for key, value in pairs(cb.attributes) do
     if attribs[key] == nil then
       attribs[key] = value
@@ -300,15 +450,15 @@ local function diagram_options(cb)
 
   local alt
   local caption
-  local fig_attr = attribs['fig-attr'] or { id = cb.identifier }
+  local fig_attr = { id = cb.identifier }
   local filename
   local image_attr = {}
   local user_opt = {}
 
   for attr_name, value in pairs(attribs) do
-    local opt_key = BLOCK_OPTIONS[attr_name]
-    if opt_key then
-      user_opt[opt_key] = value
+    local opt_name = OPTION_NAMES[attr_name]
+    if opt_name and OPTIONS[opt_name].scope ~= 'doc' then
+      user_opt[opt_name] = value
     elseif attr_name == 'alt' then
       alt = value
     elseif attr_name == 'caption' then
@@ -320,8 +470,6 @@ local function diagram_options(cb)
       fig_attr.id = value
     elseif attr_name == 'name' then
       fig_attr.name = value
-    elseif attr_name == 'fig-attr' then
-      -- Already handled
     else
       -- Check for prefixed attributes
       local prefix, key = attr_name:match '^(%a+)%-(%a[-%w]*)$'
@@ -331,8 +479,29 @@ local function diagram_options(cb)
         image_attr[key] = value
       elseif prefix == 'opt' then
         user_opt[key] = value
+      elseif from_directive[attr_name] then
+        -- Nothing recognised the name and the user wrote it as a directive.
+        -- A fence attribute may legitimately be any image attribute, so it
+        -- keeps falling through silently; a directive may not. Without this,
+        -- `%%| capton: x` became `<img capton="x">` and `%%| cache: true`
+        -- looked like it had been honoured.
+        if opt_name then
+          log.warning(
+            "tikz: '" .. attr_name .. "' is a document-level option — set it " ..
+            "under `tikz:` in the front matter or in _quarto.yml, not as a " ..
+            "%%| directive. Ignoring it."
+          )
+        else
+          log.warning(
+            "tikz: unknown %%| directive '" .. attr_name .. "' — passing it " ..
+            "through as an image attribute. Check the spelling, or write it " ..
+            "as `%%| image-" .. attr_name .. ":` if an image attribute is " ..
+            "what you meant."
+          )
+          image_attr[attr_name] = value
+        end
       else
-        -- Use as image attribute
+        -- A fence attribute nothing else claimed: an image attribute.
         image_attr[attr_name] = value
       end
     end
@@ -354,36 +523,21 @@ local function mime_for_format(format)
   return 'image/svg+xml'
 end
 
--- Construct a cache filename of the form `<label>.<short-hash>.<format>`.
--- Including the basename makes a directory listing diagnosable (you can
--- tell which diagram produced which file at a glance), while the short
--- hash preserves cache-key uniqueness across code/option changes.
+-- Encode an option table so it can be hashed. Not `stringify(options)`, which
+-- is wrong in two ways that each end in a shared or orphaned cache entry.
 --
--- When the caller-supplied basename is the auto-generated SHA1 of the
--- block's code (40 hex chars), we use a short literal label instead;
--- repeating the full content hash inside the filename adds no diagnostic
--- value and bloats the listing.
---
--- The key is built from a canonical encoding of the options rather than from
--- `stringify(options)` directly, for two reasons.
---
--- Order. `pairs()` iteration order is unspecified by the Lua spec. It is
--- stable for a given build, so this looks fine until the day Quarto ships a
--- pandoc whose Lua hashes keys differently — at which point every cached file
--- in every project is orphaned at once. For the in-tree cache pattern the
--- README recommends, that means a build host without TeX starts failing during
--- an unrelated dependency upgrade, with no local repro. (#21)
+-- Order. `pairs()` iteration order is unspecified by the Lua spec — stable for
+-- any one build, so a pandoc upgrade that hashes keys differently would orphan
+-- every cached file in every project at once. (#21)
 --
 -- Ambiguity. `stringify` on a table emits its *values*, concatenated with no
--- delimiter and no keys at all. So `{a = 'x', b = ''}` and `{a = '', b = 'x'}`
--- hash alike, as do `{a = 'p', b = 'q'}` and `{a = 'pq', b = ''}` — different
--- options, one cache entry, and whichever block is rendered first wins. That
--- one is a wrong image rather than a missing one.
+-- delimiter and no keys, so `{a = 'x', b = ''}` and `{a = '', b = 'x'}` hash
+-- alike — different options, one entry, and whichever block renders first wins.
 --
 -- Sorting fixes the first; length-prefixing each key and value fixes the
--- second, including for values that themselves contain the delimiters. The
--- code is length-prefixed too, so a block whose text happens to end in what
--- another block's options encode to cannot collide with it.
+-- second, including values containing the delimiters themselves. The code is
+-- length-prefixed too, so a block whose text happens to end in what another
+-- block's options encode to cannot collide with it.
 local function canonical_options(options)
   local keys = {}
   for k in pairs(options) do keys[#keys + 1] = k end
@@ -396,16 +550,29 @@ local function canonical_options(options)
   return table.concat(parts, ',')
 end
 
-local function cache_filename(basename, hash, options, format)
-  local cache_key = pandoc.sha1(
-    #hash .. ':' .. hash .. canonical_options(options)
-  )
-  local short = cache_key:sub(1, 8)
+-- The name every artifact of one diagram shares, extension aside: its cache
+-- entry, its mediabag entry, and its `save-tex` directory.
+--
+-- `<label>.<short-hash>`: the label makes a directory listing diagnosable at a
+-- glance, and the hash — taken over the code *and* the options — keeps two
+-- diagrams apart. When the basename is the auto-generated SHA1 of the code (40
+-- hex chars) a short literal label is used instead, since repeating the full
+-- content hash inside the name tells the reader nothing.
+--
+-- One function because these were once named three different ways, and only
+-- the cache folded the options in — so two blocks differing only in their
+-- options shared a single image file.
+local function artifact_name(basename, hash, options)
+  local key = pandoc.sha1(#hash .. ':' .. hash .. canonical_options(options))
   local label = basename or 'tikz'
   if #label == 40 and label:match('^[0-9a-f]+$') then
     label = 'tikz'
   end
-  return label .. '.' .. short .. '.' .. format
+  return label .. '.' .. key:sub(1, 8)
+end
+
+local function artifact_file(basename, hash, options, format)
+  return artifact_name(basename, hash, options) .. '.' .. format
 end
 
 -- Where a given diagram's cached file lives, or nil when caching is off.
@@ -416,7 +583,7 @@ end
 local function cache_path(dir, basename, hash, options, format)
   if not dir then return nil end
   return pandoc.path.join {
-    dir, cache_filename(basename, hash, options, format),
+    dir, artifact_file(basename, hash, options, format),
   }
 end
 
@@ -434,15 +601,7 @@ local function cache_image(dir, basename, hash, options, imgdata, format)
   if path then write_file(path, imgdata) end
 end
 
--- Preamble text hoisted by the latex-passthrough renderer, kept in three
--- ordered buckets and flushed once at the end of the document walk. Emitting
--- in bucket order rather than block-encounter order guarantees that a
--- `\usepackage{pgfplots}` from one block precedes a `\usepgfplotslibrary{…}`
--- hoisted out of another, and makes the preamble stable under block
--- reordering.
 local PASSTHROUGH_PACKAGES, PASSTHROUGH_LIBRARIES, PASSTHROUGH_HEADERS = 1, 2, 3
-local passthrough_preamble = { {}, {}, {} }
-local passthrough_header_seen = {}  -- Text already queued, so we emit it once.
 
 -- Queue `text` for the host document's preamble, at most once per render.
 -- Deduplication is by exact text, which is what makes it safe to hoist the
@@ -451,9 +610,9 @@ local passthrough_header_seen = {}  -- Text already queued, so we emit it once.
 -- is emitted in full rather than being cleverly merged.
 local function hoist(bucket, text)
   if not text or text == '' then return end
-  if passthrough_header_seen[text] then return end
-  passthrough_header_seen[text] = true
-  local b = passthrough_preamble[bucket]
+  if doc_state.passthrough_header_seen[text] then return end
+  doc_state.passthrough_header_seen[text] = true
+  local b = doc_state.passthrough_preamble[bucket]
   b[#b + 1] = text
 end
 
@@ -461,7 +620,7 @@ end
 -- document walk, so bucket order is what reaches the `.tex`.
 local function flush_passthrough_preamble()
   local parts = {}
-  for _, bucket in ipairs(passthrough_preamble) do
+  for _, bucket in ipairs(doc_state.passthrough_preamble) do
     for _, text in ipairs(bucket) do parts[#parts + 1] = text end
   end
   if #parts == 0 then return end
@@ -473,45 +632,6 @@ end
 local function blank_to_nil(s)
   if s == nil or s == '' then return nil end
   return s
-end
-
--- Split a string into lines, dropping the trailing empty element that a
--- final newline would otherwise produce.
-local function split_lines(s)
-  local lines = {}
-  for line in (s .. '\n'):gmatch('([^\n]*)\n') do
-    lines[#lines + 1] = line
-  end
-  if lines[#lines] == '' then table.remove(lines) end
-  return lines
-end
-
--- The block text as it matters to the *compiler*, with the `%%|` directives
--- removed. Used for the cache key and for the generated basename, never for
--- what is actually compiled.
---
--- `%%|` lines are TeX comments, so dropping them cannot change a rendered
--- byte, and every directive that does influence compilation — additionalPackages,
--- header-includes, renderer, opt-* — is folded into the options half of the key
--- separately by `diagram_options`. What is left in them is presentation:
--- caption, alt, label, name, fig-attr, filename. Hashing those meant that
--- captioning a diagram, or migrating a block from the deprecated
--- `{.tikz filename='x'}` fence attribute to the canonical `%%| filename: x`,
--- silently re-keyed a cache entry whose image had not changed — invisible
--- locally, fatal on a TeX-less build host rendering from a committed cache. (#28)
---
--- A directive sharing a line with code truncates that line rather than removing
--- it; a line left blank by the removal is dropped, so an indented directive and
--- an absent one agree.
-local function hashable_code(code)
-  local out = {}
-  for _, line in ipairs(split_lines(code)) do
-    local kept = line:gsub('%%%%|.*$', '')
-    if kept == line or not kept:match('^%s*$') then
-      out[#out + 1] = kept
-    end
-  end
-  return table.concat(out, '\n')
 end
 
 -- The library loaders we know how to hoist. All are idempotent — PGF records
@@ -619,8 +739,9 @@ local function picture_markers(line)
 end
 
 -- Prepare a block body for passthrough: hoist the library loads into the host
--- preamble and drop the `%%|` option directives (they are filter input, not
--- LaTeX). Returns the preamble lines, the remaining body, and any warnings.
+-- preamble. The `%%|` option directives are already gone: `split_directives`
+-- removes them before any renderer sees the code. Returns the preamble lines,
+-- the remaining body, and any warnings.
 --
 -- Two passes, because how a load is written decides what we may do with it:
 --
@@ -645,18 +766,10 @@ end
 -- hard error), one whose argument won't brace-balance, and `\usepackage` /
 -- `\usegdlibrary`. Those only produce a warning.
 --
--- Pass 1 tracks `tikzpicture` depth for exactly that reason. It used to run
--- before any depth was known, so an own-line loader *inside* a picture was
--- silently moved — the one case the paragraph above promises to leave alone,
--- and the one where moving it is most likely to be wrong:
---
---     \node {
---     \usetikzlibrary{arrows}
---     };
---
--- is literal content on its own line. Deleting it changes the drawing and
--- adds a preamble line nobody asked for. Pass 2 already refused the same
--- construct when it shared a line with other code; the two passes now agree.
+-- Pass 1 tracks `tikzpicture` depth for exactly that reason, so that both
+-- passes agree about a loader inside a picture. An own-line one is still
+-- literal content — `\node {` / `\usetikzlibrary{arrows}` / `};` — and moving
+-- it would change the drawing.
 local function prepare_passthrough_body(code)
   local preamble, body, warns = {}, {}, {}
 
@@ -667,7 +780,7 @@ local function prepare_passthrough_body(code)
       for _, name in ipairs(split_libs(arg)) do
         preamble[#preamble + 1] = '\\' .. macro .. '{' .. name .. '}'
       end
-    elseif not line:match('^%s*%%%%|') then
+    else
       -- Kept, including a loader inside a picture: pass 2 sees it and warns.
       body[#body + 1] = line
     end
@@ -760,9 +873,9 @@ end
 -- Inject TikZJax assets (link + script tags) into the document head exactly
 -- once per render. Subsequent calls are no-ops.
 local function inject_tikzjax_assets(conf)
-  if tikzjax_assets_injected then return end
-  tikzjax_assets_injected = true
-  local url = conf.tikzjax_url
+  if doc_state.tikzjax_assets_injected then return end
+  doc_state.tikzjax_assets_injected = true
+  local url = conf['tikzjax-url']
   local html = string.format(
     '<link rel="stylesheet" href="%s/fonts.css">\n' ..
     '<script src="%s/tikzjax.js"></script>',
@@ -798,15 +911,6 @@ local function is_html_output()
     or (FORMAT and FORMAT:match('^html') ~= nil)
 end
 
--- Counter giving each inlined SVG on a page its own namespace. A counter
--- rather than the cache key, because two *identical* diagrams share a key and
--- would then share ids as well.
-local inline_svg_seq = 0
-
--- Escape a string for use as a Lua pattern / as a gsub replacement.
-local function pat_escape(s) return (s:gsub('(%W)', '%%%1')) end
-local function rep_escape(s) return (s:gsub('%%', '%%%%')) end
-
 -- Rewrite an SVG so it can be dropped into an HTML page beside others.
 --
 -- Inside an `<img>` an SVG is its own document: its ids, CSS classes and
@@ -834,94 +938,140 @@ local function namespace_svg(svg, nonce, alt)
   if not root then return nil end
   svg = svg:sub(root)
 
-  local function rename(names, rewrites)
-    for name in pairs(names) do
-      -- `from` is spliced into a pattern by an inner gsub, so it has to survive
-      -- being a *replacement* first: pat_escape('glyph-0-0') is 'glyph%-0%-0',
-      -- and a bare '%-' in a replacement string is an error.
-      local from = rep_escape(pat_escape(name))
-      local to = rep_escape(rep_escape(name .. '-' .. nonce))
-      for _, r in ipairs(rewrites) do
-        svg = svg:gsub(r[1]:gsub('@', from), (r[2]:gsub('@', to)))
-      end
-    end
+  -- The namespaced form of `name`, or nil when it is not one we collected —
+  -- and nil is what tells `gsub` to leave the match alone. Every pattern below
+  -- is therefore free to be written broadly: the lookup, not the pattern, is
+  -- what decides whether something is renamed.
+  local function ns(names, name)
+    if not names[name] then return nil end
+    return name .. '-' .. nonce
   end
+  local function sub(pattern, f) svg = svg:gsub(pattern, f) end
 
-  -- ids, and the three ways one SVG refers to another element. The patterns
-  -- are anchored on the closing quote or paren, so an id that is a prefix of
-  -- another (`clip-0` inside `clip-01`) cannot be partially rewritten.
-  local ids = {}
-  for q, name in svg:gmatch('id%s*=%s*(["\'])(.-)%1') do
+  -- Collect every name first, then rewrite. Collecting as we go would read a
+  -- document already half-rewritten.
+  local ids, classes, families = {}, {}, {}
+  for _, name in svg:gmatch('id%s*=%s*(["\'])(.-)%1') do
     if name ~= '' then ids[name] = true end
   end
-  rename(ids, {
-    { '(id%s*=%s*["\'])@(["\'])',   '%1@%2' },
-    { 'url%(#@%)',                  'url(#@)' },
-    { '(href%s*=%s*["\'])#@(["\'])', '%1#@%2' },
-  })
-
-  -- CSS class names: the `class='f0'` attribute and the `.f0 {` selector.
-  -- Only single-class attributes are matched; no converter we support emits
-  -- multiple classes on one element.
-  local classes = {}
-  for name in svg:gmatch('class%s*=%s*["\']([%w_%-]+)["\']') do classes[name] = true end
-  rename(classes, {
-    { '(class%s*=%s*["\'])@(["\'])', '%1@%2' },
-    { '(%.)@(%s*{)',                 '%1@%2' },
-  })
-
-  -- `@font-face` families, and both ways a family is referenced.
-  local families = {}
+  -- A `class` attribute may carry several names, so they are collected — and
+  -- rewritten below — token by token. Treating the attribute as a single name
+  -- meant `class="f0 bold"` matched nothing while the `.f0` selector was still
+  -- renamed, silently detaching the style from the element.
+  for value in svg:gmatch('class%s*=%s*["\']([^"\']*)["\']') do
+    for token in value:gmatch('%S+') do classes[token] = true end
+  end
   for name in svg:gmatch('@font%-face%s*{%s*font%-family%s*:%s*([%w_%-]+)') do
     families[name] = true
   end
-  rename(families, {
-    { '(font%-family%s*:%s*)@([;}])',       '%1@%2' },
-    { '(font%-family%s*=%s*["\'])@(["\'])', '%1@%2' },
-  })
+
+  -- ids, and the three ways one SVG refers to another element. The name
+  -- arrives as a capture and the surroundings are rebuilt around it, so an id
+  -- that is a prefix of another (`clip-0` inside `clip-01`) cannot be
+  -- partially rewritten.
+  sub('(id%s*=%s*["\'])([^"\']*)(["\'])', function(a, name, b)
+    local t = ns(ids, name); return t and (a .. t .. b) or nil
+  end)
+  sub('url%(#([^)]*)%)', function(name)
+    local t = ns(ids, name); return t and ('url(#' .. t .. ')') or nil
+  end)
+  sub('(href%s*=%s*["\'])#([^"\']*)(["\'])', function(a, name, b)
+    local t = ns(ids, name); return t and (a .. '#' .. t .. b) or nil
+  end)
+
+  -- CSS class names: the `class='f0 bold'` attribute and the `.f0` selector.
+  -- One pattern covers every selector shape — `.f0 {`, `.f0{`, and the
+  -- `.f0, .f1 {` group that the old `(%.)@(%s*{)` silently skipped while
+  -- renaming the attributes it applied to.
+  sub('(class%s*=%s*["\'])([^"\']*)(["\'])', function(a, value, b)
+    local out = {}
+    for token in value:gmatch('%S+') do out[#out + 1] = ns(classes, token) or token end
+    if #out == 0 then return nil end
+    return a .. table.concat(out, ' ') .. b
+  end)
+  sub('%.([%w_%-]+)', function(name)
+    local t = ns(classes, name); return t and ('.' .. t) or nil
+  end)
+
+  -- `@font-face` families, and both ways a family is referenced.
+  sub('(font%-family%s*:%s*)([%w_%-]+)([;}])', function(a, name, b)
+    local t = ns(families, name); return t and (a .. t .. b) or nil
+  end)
+  sub('(font%-family%s*=%s*["\'])([^"\']*)(["\'])', function(a, name, b)
+    local t = ns(families, name); return t and (a .. t .. b) or nil
+  end)
+
+  -- Where the root `<svg …>` tag ends: the first `>` that is not inside a
+  -- quoted attribute value. `<svg[^>]*>` stopped at the first `>` whatever it
+  -- was, so `<svg data-x="a>b">` had the <title> spliced into the middle of
+  -- the attribute.
+  local stop
+  do
+    local quote
+    for i = 1, #svg do
+      local c = svg:sub(i, i)
+      if quote then
+        if c == quote then quote = nil end
+      elseif c == '"' or c == "'" then quote = c
+      elseif c == '>' then stop = i break end
+    end
+  end
+  if not stop then return svg end
+
+  local head, rest = svg:sub(1, stop), svg:sub(stop + 1)
+  -- A self-closing root has no inside to put a <title> in, so open it up.
+  -- Only an empty diagram produces one, but appending to `<svg …/>` put the
+  -- title outside the element entirely.
+  if head:match('/%s*>$') then
+    head = head:gsub('/%s*>$', '>')
+    rest = '</svg>' .. rest
+  end
 
   -- Give the page a styling hook, and the accessibility tree a name. `<title>`
   -- rather than `role="img"` + `aria-label`, which would hide the very text
   -- that inlining exists to expose.
-  local head, rest = svg:match('^(<svg[^>]*>)(.*)$')
-  if head then
-    -- Added after the renaming pass, so the hook is a stable page-wide
-    -- selector rather than another namespaced name. A class already on the
-    -- root has been namespaced like any other by this point; keep it and
-    -- append, rather than replacing what the converter put there.
-    local existing = head:match('class%s*=%s*["\']([^"\']*)["\']')
-    if existing then
-      -- Pattern built by concatenation, so only pat_escape here; the
-      -- replacement half still needs rep_escape.
-      head = head:gsub('(class%s*=%s*["\'])' .. pat_escape(existing),
-                       '%1' .. rep_escape(existing) .. ' tikz-svg', 1)
-    else
-      head = head:gsub('^<svg', '<svg class="tikz-svg"', 1)
-    end
-    local title = alt and stringify(alt) or ''
-    if title ~= '' then
-      title = title:gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;')
-      head = head .. '<title>' .. title .. '</title>'
-    end
-    svg = head .. rest
+  --
+  -- The hook is added after the renaming pass, so it is a stable page-wide
+  -- selector rather than another namespaced name. A class already on the root
+  -- has been namespaced like any other by this point; keep it and append.
+  local hooked, n = head:gsub('(class%s*=%s*["\'])([^"\']*)(["\'])',
+    function(a, value, b) return a .. value .. ' tikz-svg' .. b end, 1)
+  if n == 0 then hooked = head:gsub('^<svg', '<svg class="tikz-svg"', 1) end
+  head = hooked
+
+  local title = alt and stringify(alt) or ''
+  if title ~= '' then
+    title = title:gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;')
+    head = head .. '<title>' .. title .. '</title>'
   end
-  return svg
+  return head .. rest
 end
 
--- What the TeX run has to leave behind for the SVG converter to read.
+-- The shape of one LaTeX render: what the TeX run must leave behind, and
+-- whether a converter then runs over it.
 --
--- Only `dvisvgm` consumes a DVI, and only when it is the converter that will
--- actually run. `svg-command` takes precedence over `svg-engine` at
--- conversion time, and its `{input}` is documented as the intermediate PDF,
--- so a custom command always gets a PDF. Deciding this from `svg_engine`
--- alone was the bug: `svg-engine: dvisvgm` together with `svg-command:` asked
--- the TeX engine for DVI and then handed the converter an `{input}` naming a
--- PDF that was never written, failing with a missing-file error that named
--- neither cause.
-local function intermediate_format(svg_engine, svg_command)
-  if svg_command then return 'pdf' end
-  if svg_engine == 'dvisvgm' then return 'dvi' end
-  return 'pdf'
+-- These were two decisions in two places, taken from overlapping inputs, and
+-- they could contradict each other. `intermediate_format` chose DVI from
+-- `svg-engine` alone, without knowing that under LaTeX output the intermediate
+-- *is* the deliverable and no converter runs at all. So `format: pdf` together
+-- with `svg-engine: dvisvgm` asked the TeX engine for a DVI and then read a PDF
+-- nothing had written — every diagram in the document failing with a
+-- missing-file error that named neither cause.
+--
+-- Deciding both here makes that unrepresentable: when nothing is converted, the
+-- intermediate is by definition the format we deliver.
+local function pipeline_for(deliverable, svg_engine, svg_command)
+  -- Under LaTeX output we embed the TeX run's own PDF directly. This skips the
+  -- converter round-trip and preserves vector fidelity and fonts.
+  if deliverable == 'pdf' then
+    return { intermediate = 'pdf', convert = false }
+  end
+  -- Only dvisvgm reads a DVI, and only when it is the converter that will
+  -- actually run: `svg-command` takes precedence over `svg-engine`, and its
+  -- `{input}` is documented as the intermediate PDF.
+  if svg_command then return { intermediate = 'pdf', convert = true } end
+  if svg_engine == 'dvisvgm' then return { intermediate = 'dvi', convert = true } end
+  return { intermediate = 'pdf', convert = true }
 end
 
 -- The bundled standalone template, used unless `tikz.tex-template` supplies
@@ -962,21 +1112,21 @@ end
 -- `files` carries the paths the TeX run produced or is expected to produce:
 -- `pdf`, `dvi`, `svg`.
 local function convert_command(conf, files)
-  if conf.svg_command then
+  if conf['svg-command'] then
     -- Element 1 is the executable; the rest are its arguments, with
-    -- {input}/{output} substituted. rep_escape because these are gsub
-    -- *replacements*: a '%' in a user-supplied `filename` would otherwise be
-    -- read as a capture reference.
+    -- {input}/{output} substituted. Function replacements, because a plain
+    -- one would read a '%' in a user-supplied `filename` as a capture
+    -- reference; a function's return value is used verbatim.
     local args = {}
-    for i = 2, #conf.svg_command do
-      args[#args + 1] = conf.svg_command[i]
-        :gsub('{input}', rep_escape(files.pdf))
-        :gsub('{output}', rep_escape(files.svg))
+    for i = 2, #conf['svg-command'] do
+      args[#args + 1] = conf['svg-command'][i]
+        :gsub('{input}', function() return files.pdf end)
+        :gsub('{output}', function() return files.svg end)
     end
-    return conf.svg_command[1], args
+    return conf['svg-command'][1], args
   end
 
-  if conf.svg_engine == 'dvisvgm' then
+  if conf['svg-engine'] == 'dvisvgm' then
     -- dvisvgm reads DVI directly. --font-format=woff embeds fonts as WOFF
     -- (instead of converting glyphs to paths), which keeps text selectable /
     -- styleable in the rendered SVG — the thing `embed: inline` exists to
@@ -986,7 +1136,7 @@ local function convert_command(conf, files)
     return 'dvisvgm', { '--font-format=woff', '-o', files.svg, files.dvi }
   end
 
-  if conf.svg_engine == 'pdftocairo' then
+  if conf['svg-engine'] == 'pdftocairo' then
     -- pdftocairo (poppler-utils) reads PDF and is widely available; a good
     -- lightweight alternative to Inkscape where Inkscape isn't installed.
     return 'pdftocairo', { '-svg', files.pdf, files.svg }
@@ -1010,11 +1160,9 @@ end
 -- drew it, and an uncaptioned one is emitted bare — no float, no centring,
 -- placement left to the caller.
 --
--- The only thing that differed between the four copies of this was whether
--- the content was already a Block. Three renderers produce a `RawBlock`,
--- which `Figure` takes directly; the `<img>` path produces an `Image`, which
--- is an Inline and needs a `Plain` around it. That is now handled here rather
--- than restated at each return.
+-- Three renderers produce a `RawBlock`, which `Figure` takes directly; the
+-- `<img>` path produces an `Image`, which is an Inline and needs a `Plain`
+-- around it. Handled here rather than restated at each return.
 local function as_figure(content, dgr_opt)
   local block = content.t == 'Image' and pandoc.Plain { content } or content
   if not dgr_opt.caption then return block end
@@ -1024,43 +1172,34 @@ end
 -- Compile TikZ code to either SVG (default) or PDF (passthrough, used when
 -- the Quarto output format is PDF).
 --
--- Returns `imgdata, mimetype` on success and `nil, message` on failure. It
--- deliberately does not use `error()` for expected failures — a missing TeX
--- engine, a LaTeX run that did not produce a file. Under Quarto, `error()`
--- inside a filter is intercepted: the message is logged but execution
--- *continues to the next statement*, and a surrounding `pcall` reports
--- success. Verified on Quarto 1.10.18 with an eight-line filter:
+-- Returns `imgdata, mimetype` on success and `nil, message` on failure, and
+-- deliberately does not `error()` for an expected failure — a missing TeX
+-- engine, a LaTeX run that produced no file.
 --
---     error('boom')                      --> logs "ERROR (…) boom", continues
---     pcall(function() error('boom') end) --> true, nil
---
--- So every `error()` here used to be a log-and-carry-on that left the rest of
--- the pipeline running against a file that was never produced: one missing
--- engine emitted four errors, then handed `nil` to the cache writer, whose
--- genuine runtime error (`fh:write(nil)`) *did* propagate and took the entire
--- render down. Returning failures makes the control flow independent of the
--- host's error semantics, which is what we want regardless of which way
--- Quarto jumps in future. (#30)
-local function compile_tikz_to_svg(code, user_opts, conf, basename)
+-- `error()` inside a filter does not do what it looks like under Quarto
+-- (verified on 1.10.18): the message is logged but execution continues to the
+-- next statement, and a surrounding `pcall` reports success. Returning
+-- failures keeps this control flow independent of the host's error semantics,
+-- whichever way Quarto jumps in future. (#30)
+local function compile_tikz_to_svg(code, user_opts, conf, name)
   -- Ensure required dependencies are available
-  if not check_dependency(conf.tex_engine) then
-    return nil, conf.tex_engine .. " not found. Install it, or set " ..
+  if not check_dependency(conf['tex-engine']) then
+    return nil, conf['tex-engine'] .. " not found. Install it, or set " ..
       "tikz.tex-engine to a TeX engine you do have (pdflatex, lualatex, " ..
       "xelatex, …)."
   end
   -- The svg converter is only needed when we actually convert to SVG. For
   -- PDF output we embed the intermediate PDF directly and nothing here is
   -- invoked.
-  local base_filename = basename or "tikz-image"
   local files = {
-    tex = base_filename .. ".tex",
-    pdf = base_filename .. ".pdf",
-    svg = base_filename .. ".svg",
-    dvi = base_filename .. ".dvi",
-    log = base_filename .. ".log",
+    tex = name .. ".tex",
+    pdf = name .. ".pdf",
+    svg = name .. ".svg",
+    dvi = name .. ".dvi",
+    log = name .. ".log",
   }
   local convert_cmd, convert_args = convert_command(conf, files)
-  if conf.image_format ~= 'pdf' and not check_dependency(convert_cmd) then
+  if conf.pipeline.convert and not check_dependency(convert_cmd) then
     return nil, convert_cmd .. " not found. Install it (it is the configured " ..
       "SVG converter), or set tikz.svg-engine / tikz.svg-command to one you " ..
       "do have."
@@ -1081,33 +1220,34 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
       env.TEXINPUTS = conf.texinputs
       -- Ask for DVI only when the converter we are actually going to run
       -- consumes one; every other path reads the default PDF output. See
-      -- `intermediate_format`.
+      -- `pipeline_for`.
       local latex_args = { '-interaction=nonstopmode' }
-      if conf.intermediate == 'dvi' then
+      if conf.pipeline.intermediate == 'dvi' then
         table.insert(latex_args, '-output-format=dvi')
       end
       table.insert(latex_args, files.tex)
       local success, latex_result = pcall(function()
         return pandoc.system.with_environment(env, function()
-          return pandoc.pipe(conf.tex_engine, latex_args, '')
+          return pandoc.pipe(conf['tex-engine'], latex_args, '')
         end)
       end)
       if not success then
-        return nil, "Error compiling TikZ figure '" .. base_filename .. "':\n" ..
+        return nil, "Error compiling TikZ figure '" .. name .. "':\n" ..
           tostring(latex_result) .. "\nLaTeX Log:\n" ..
           (read_file(files.log) or "") .. "\nTikZ Code:\n" .. code
       end
 
-      -- For PDF output, embed the intermediate PDF directly — no SVG
-      -- conversion needed. This skips the Inkscape rasterization round-trip
-      -- and preserves vector fidelity / fonts in the rendered PDF.
-      if conf.image_format == 'pdf' then
-        local imgdata = read_file(files.pdf)
+      -- Nothing to convert: the intermediate the TeX run produced is what we
+      -- deliver. Reading `pipeline.intermediate` rather than assuming a PDF is
+      -- what keeps this in step with what the TeX run was actually asked for.
+      if not conf.pipeline.convert then
+        local produced = files[conf.pipeline.intermediate]
+        local imgdata = read_file(produced)
         if not imgdata then
-          return nil, "Failed to read generated PDF file for TikZ figure '" ..
-            base_filename .. "'.\nTikZ Code:\n" .. code
+          return nil, "Failed to read " .. produced .. " for TikZ figure '" ..
+            name .. "'.\nTikZ Code:\n" .. code
         end
-        return imgdata, 'application/pdf'
+        return imgdata, mime_for_format(conf.pipeline.intermediate)
       end
 
       -- Convert TeX output to SVG with the command chosen above.
@@ -1116,7 +1256,7 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
       )
       if not success_convert then
         return nil, "Error converting to SVG (command: " .. convert_cmd ..
-          ") for TikZ figure '" .. base_filename .. "':\n" ..
+          ") for TikZ figure '" .. name .. "':\n" ..
           tostring(convert_result) .. "\nTikZ Code:\n" .. code
       end
 
@@ -1124,17 +1264,17 @@ local function compile_tikz_to_svg(code, user_opts, conf, basename)
       local imgdata = read_file(files.svg)
       if not imgdata then
         return nil, "Failed to read generated SVG file for TikZ figure '" ..
-          base_filename .. "'.\nTikZ Code:\n" .. code
+          name .. "'.\nTikZ Code:\n" .. code
       end
       return imgdata, 'image/svg+xml'
     end)
   end
 
-  if conf.save_tex then
-    local dir = conf.tex_dir
-    -- Use the basename or hash to create a subdirectory
-    local subdir_name = basename or pandoc.sha1(code)
-    local diagram_dir = pandoc.path.join { dir, subdir_name }
+  if conf['save-tex'] then
+    -- One subdirectory per diagram, under the same name as everything else
+    -- it produces — so two blocks sharing a `%%| filename:` no longer
+    -- overwrite each other's intermediates.
+    local diagram_dir = pandoc.path.join { conf['tex-dir'], name }
     pandoc.system.make_directory(diagram_dir, true)
     return process_in_dir(diagram_dir)
   else
@@ -1161,38 +1301,15 @@ end
 --   * `embed`              — how a rendered SVG reaches an HTML page. Changes
 --                            the delivery, never the bytes.
 --
--- `key_opts` is a *separate table*, not `user_opt` with keys deleted from it.
--- That distinction is the whole point of this function. The old code mutated
--- one table that served as both compiler options and cache-key material, so
--- every axis had to remember to erase its own raw directive text before the
--- key was taken. `embed` and `latex-passthrough` remembered; `renderer` did
--- not, and a no-op `%%| renderer: latex` therefore produced a second cache
--- entry for a byte-identical image — as did any value that had already been
--- warned about and discarded. That is the #28 failure again: a presentation
--- level edit orphaning a committed cache entry, invisible on a machine with
--- TeX and fatal on a build host without one.
---
--- Building the key from the *resolved* values instead makes that class of bug
--- unreachable: a raw directive can only reach the key by being copied there.
+-- `key_opts` is a *separate table*, not `user_opt` with keys deleted from it,
+-- and it is built from the *resolved* values. That is the whole point of this
+-- function: a raw directive can only reach the key by being copied there, so a
+-- no-op `%%| renderer: latex` — or a value that was rejected and warned about
+-- — cannot mint a second cache entry for a byte-identical image. (#28)
 local function resolve_axes(user_opt, conf)
-  local renderer = normalize_renderer(user_opt['renderer'], '%%| renderer:')
-    or conf.renderer or 'latex'
-
-  local passthrough = user_opt['latex-passthrough']
-  if passthrough ~= nil then
-    local parsed = truthy(passthrough)
-    if parsed == nil then
-      log.warning(
-        "tikz: %%| latex-passthrough: expects true or false, got '" ..
-        stringify(passthrough) .. "'. Ignoring it."
-      )
-    end
-    passthrough = parsed
-  end
-  if passthrough == nil then passthrough = conf.latex_passthrough end
-
-  local embed = normalize_embed(user_opt['embed'], '%%| embed:')
-    or conf.embed or 'img'
+  local renderer = resolve_option('renderer', user_opt, conf)
+  local passthrough = resolve_option('latex-passthrough', user_opt, conf)
+  local embed = resolve_option('embed', user_opt, conf)
 
   -- Everything that influences the rendered bytes, and nothing else.
   local key_opts = {}
@@ -1211,10 +1328,10 @@ local function resolve_axes(user_opt, conf)
   if conf.tex_template_content then
     key_opts['tex-template-hash'] = pandoc.sha1(conf.tex_template_content)
   end
-  key_opts['tex-engine'] = conf.tex_engine
-  key_opts['svg-engine'] = conf.svg_engine
-  if conf.svg_command then
-    key_opts['svg-command'] = table.concat(conf.svg_command, ' ')
+  key_opts['tex-engine'] = conf['tex-engine']
+  key_opts['svg-engine'] = conf['svg-engine']
+  if conf['svg-command'] then
+    key_opts['svg-command'] = table.concat(conf['svg-command'], ' ')
   end
 
   return renderer, passthrough, embed, key_opts
@@ -1232,8 +1349,11 @@ local function code_to_figure(conf)
       return nil
     end
 
-    -- Get options from code block
-    local dgr_opt = diagram_options(block)
+    -- Parse the block once. `code` is the text with every `%%|` directive
+    -- stripped: what the renderers compile, and — as `hash` below — what the
+    -- cache key and the generated basename are taken over.
+    local directives, code = split_directives(block.text)
+    local dgr_opt = diagram_options(block, directives)
     local renderer, passthrough, embed, key_opts = resolve_axes(dgr_opt.opt, conf)
     -- The other half of the split: what the renderers read. Only
     -- `additional-packages` and `header-includes` are consulted, so the
@@ -1251,7 +1371,7 @@ local function code_to_figure(conf)
     -- to a LaTeX build, not fall into tikzjax's drop-for-non-HTML rule.
     if passthrough and conf.host_is_latex then
       local raw = embed_latex_passthrough(
-        block.text, compile_opts,
+        code, compile_opts,
         dgr_opt.filename or blank_to_nil(dgr_opt['fig-attr'].id) or '<unnamed>'
       )
       return as_figure(raw, dgr_opt)
@@ -1270,13 +1390,18 @@ local function code_to_figure(conf)
         )
         return {}  -- remove the block from the output entirely
       end
-      return as_figure(embed_tikzjax(block.text, compile_opts, conf), dgr_opt)
+      return as_figure(embed_tikzjax(code, compile_opts, conf), dgr_opt)
     end
 
-    -- The block text as it matters to the compiler: the basis for both the
-    -- generated basename and the cache key, so the two cannot drift apart.
-    local hash = hashable_code(block.text)
+    -- The stripped code is the basis for both the generated basename and the
+    -- cache key, so the two cannot drift apart.
+    local hash = code
     local basename = dgr_opt.filename or pandoc.sha1(hash)
+    -- One name for every artifact this diagram produces: its cache entry, the
+    -- file handed to the mediabag, the `save-tex` directory, and whatever the
+    -- diagnostics below name. Derived from the code *and* the options, so two
+    -- blocks that differ only in their options no longer share a file.
+    local name = artifact_name(basename, hash, key_opts)
 
     -- Check if image is cached
     local imgdata, imgtype = nil, nil
@@ -1285,22 +1410,14 @@ local function code_to_figure(conf)
       conf.image_cache, basename, hash, key_opts, image_format)
 
     if not imgdata or not imgtype then
-      -- No cached image; compile TikZ code. Two failure channels, because
-      -- they mean different things and only one of them is under our
-      -- control:
-      --
-      --   * `compile_tikz_to_svg` returns `nil, message` for an expected
-      --     failure — a missing engine, a LaTeX run that produced no file.
-      --   * `pcall` still guards against a genuine runtime error in the
-      --     filter itself, which (unlike `error()`, see the note on
-      --     compile_tikz_to_svg) really does propagate under Quarto.
-      --
-      -- Either way one diagram must not take down the render: log it once,
-      -- leave the block as its source, and let the rest of the document
-      -- through. On a build host without TeX that turns a failed publish
-      -- into a cosmetic gap. (#30)
+      -- No cached image; compile. Two failure channels: a returned
+      -- `nil, message` for an expected failure, and `pcall` for a genuine
+      -- runtime error in the filter itself, which — unlike `error()`, see the
+      -- note on `compile_tikz_to_svg` — really does propagate under Quarto.
+      -- Either way one diagram must not take down the render: log it, leave
+      -- the block as its source, and let the document through. (#30)
       local ok, result, extra = pcall(function()
-        return compile_tikz_to_svg(block.text, compile_opts, conf, basename)
+        return compile_tikz_to_svg(code, compile_opts, conf, name)
       end)
       local failure
       if not ok then
@@ -1310,7 +1427,7 @@ local function code_to_figure(conf)
       end
       if failure then
         log.error(
-          "tikz: could not render figure '" .. basename .. "', leaving the " ..
+          "tikz: could not render figure '" .. name .. "', leaving the " ..
           "block unrendered.\n" .. failure
         )
         return nil -- Return the original block unchanged
@@ -1333,19 +1450,18 @@ local function code_to_figure(conf)
     -- Restricted to HTML output. `image_format` is 'svg' for everything that
     -- is not LaTeX, docx included, and docx needs a genuine image file. (#27)
     if embed == 'inline' and image_format == 'svg' and is_html_output() then
-      inline_svg_seq = inline_svg_seq + 1
-      local markup = namespace_svg(imgdata, 'tikz' .. inline_svg_seq, dgr_opt.alt)
+      doc_state.inline_svg_seq = doc_state.inline_svg_seq + 1
+      local markup = namespace_svg(imgdata, 'tikz' .. doc_state.inline_svg_seq, dgr_opt.alt)
       if markup then
         return as_figure(pandoc.RawBlock('html', markup), dgr_opt)
       end
       log.warning(
-        "tikz: could not inline figure '" .. basename .. "' (no <svg> root " ..
+        "tikz: could not inline figure '" .. name .. "' (no <svg> root " ..
         "in the converter's output); falling back to an <img> reference."
       )
     end
 
-    -- Use the block's filename attribute or create a new name by hashing the image content.
-    local fname = basename .. '.' .. image_format
+    local fname = name .. '.' .. image_format
 
     -- Store the data in the mediabag:
     pandoc.mediabag.insert(fname, imgtype, imgdata)
@@ -1362,8 +1478,13 @@ end
 local function absolutize(p)
   if not p or p == '' then return nil end
   if pandoc.path.is_absolute(p) then return p end
-  local cwd = os.getenv('PWD') or os.getenv('CD') or '.'
-  return pandoc.path.normalize(pandoc.path.join { cwd, p })
+  -- `pandoc.system.get_working_directory()` rather than $PWD: PWD is a shell
+  -- convention, not something every launcher exports, and the old `or '.'`
+  -- fallback produced exactly the relative path this function exists to
+  -- prevent.
+  return pandoc.path.normalize(
+    pandoc.path.join { pandoc.system.get_working_directory(), p }
+  )
 end
 
 -- Build TEXINPUTS so TikZ blocks can \input shared files from the qmd
@@ -1398,126 +1519,77 @@ local function build_texinputs()
   return table.concat(parts, sep) .. sep
 end
 
--- Reading one document-level option. Metadata values arrive as Inlines or as
--- MetaBool, never as plain Lua strings, so every one of these needed the
--- same `x and stringify(x) or default` dance — repeated five times, with the
--- subtlety that an *explicitly empty* value and an absent one are different
--- things to some callers.
-local function meta_string(conf, name, default)
-  local value = conf[name]
-  if value == nil then return default end
-  return stringify(value)
-end
-
--- …and one that must be drawn from a fixed set. `normalize_enum` already
--- does this for the per-block axes; this is the document-level half, which
--- differs only in wanting the default substituted rather than nil returned.
-local function meta_enum(conf, name, known, default, supported)
-  local value = meta_string(conf, name, nil)
-  if value == nil then return default end
-  return normalize_enum(value, known, 'tikz.' .. name, supported) or default
-end
-
 -- Function to configure the filter based on document metadata. Reads
 -- top-level `tikz:` config and produces a normalized `conf` table that the
 -- per-block code path consumes.
 local function configure (meta)
-  local conf = meta.tikz or {}
+  local raw = meta.tikz or {}
   meta.tikz = nil  -- Remove tikz metadata to avoid processing it further
 
-  -- cache for image files
-  local image_cache = nil
-  if conf.cache == true then
-    image_cache = conf['cache-dir']
-      and stringify(conf['cache-dir'])
-      or cachedir()
-    if image_cache then
-      pandoc.system.make_directory(image_cache, true)
+  -- Every document-level option, through the one schema-driven reader. This
+  -- was fifteen hand-written reads in four different styles, which is how
+  -- `cache: "true"` came to be silently ignored while `save-tex: "false"`
+  -- silently switched save-tex on.
+  --
+  -- `conf` is keyed by canonical option name, so the spelling of a field says
+  -- what it is: hyphens for something the user wrote, underscores for
+  -- something we derived from it below.
+  local conf = {}
+  for name, spec in pairs(OPTIONS) do
+    if spec.scope ~= 'block' then
+      local value = read_option(name, raw[name], 'tikz.' .. name)
+      if value == nil then value = spec.default end
+      conf[name] = value
     end
   end
 
-  -- Handle save-tex option
-  local save_tex = conf['save-tex'] or false
-  local tex_dir = nil
-  if save_tex then
-    if image_cache then
-      -- Both cache and save-tex are enabled; raise a warning and disable save-tex
-      log.warning("Both 'cache' and 'save-tex' are enabled. Disabling 'save-tex' since caching is active.")
-      save_tex = false
+  -- Strip a trailing slash so concatenation with /fonts.css and /tikzjax.js
+  -- produces a single separator however the user wrote the URL.
+  conf['tikzjax-url'] = conf['tikzjax-url']:gsub('/+$', '')
+
+  -- On-disk cache for rendered images.
+  if conf['cache'] then
+    conf.image_cache = conf['cache-dir'] or cachedir()
+    if conf.image_cache then
+      pandoc.system.make_directory(conf.image_cache, true)
+    end
+  end
+
+  -- `save-tex` preserves the intermediates for debugging, which caching makes
+  -- pointless: on a cache hit nothing is compiled, so there is nothing to keep.
+  if conf['save-tex'] then
+    if conf.image_cache then
+      log.warning(
+        "tikz: both 'cache' and 'save-tex' are enabled; disabling 'save-tex', " ..
+        "because a cache hit compiles nothing to preserve."
+      )
+      conf['save-tex'] = false
     else
-      tex_dir = meta_string(conf, 'tex-dir', 'tikz-tex')
-      pandoc.system.make_directory(tex_dir, true)
+      pandoc.system.make_directory(conf['tex-dir'], true)
     end
   end
 
-  -- Custom LaTeX standalone template. Read once at filter setup so we don't
-  -- pay file I/O per diagram, and so the path resolves against the qmd's
-  -- cwd before with_working_directory changes it.
-  local tex_template_content = nil
-  local tex_template = meta_string(conf, 'tex-template', nil)
-  if tex_template then
-    local tex_template_path = absolutize(tex_template)
-    tex_template_content = read_file(tex_template_path)
-    if not tex_template_content then
+  -- Custom standalone template, read once at setup so we neither pay file I/O
+  -- per diagram nor resolve the path after `with_working_directory` has moved.
+  if conf['tex-template'] then
+    local path = absolutize(conf['tex-template'])
+    conf.tex_template_content = read_file(path)
+    if not conf.tex_template_content then
       log.error(
-        "tikz: tex-template not found: " .. tostring(tex_template_path) ..
+        "tikz: tex-template not found: " .. tostring(path) ..
         " — falling back to the default template."
       )
     end
   end
 
-  -- TeX engine. Defaults to pdflatex (the historical behaviour). Users who
-  -- need lualatex/xelatex (e.g. for fontspec, complex Unicode scripts) can
-  -- opt in. Anything matching an executable on PATH is accepted.
-  local tex_engine = meta_string(conf, 'tex-engine', 'pdflatex')
-
-  -- SVG engine. Choices:
-  --   inkscape   — default. Consumes the PDF produced by pdflatex.
-  --   pdftocairo — poppler-utils. Lightweight alternative to inkscape;
-  --                also consumes the PDF.
-  --   dvisvgm    — consumes a DVI (we ask pdflatex for -output-format=dvi
-  --                in that case). Embeds fonts as WOFF so text in the
-  --                rendered SVG stays selectable.
-  local svg_engine = meta_enum(conf, 'svg-engine', KNOWN_SVG_ENGINES,
-    'inkscape', 'inkscape, dvisvgm, pdftocairo')
-
-  -- Custom svg-command escape hatch. Lets users wire any external converter
-  -- (pdf2svg, pymupdf script, mutool, …) without us having to bless each by
-  -- name. Two YAML forms are accepted:
-  --   svg-command: "mytool {input} {output}"           # whitespace-tokenized
-  --   svg-command: [mytool, "{input}", "{output}"]     # explicit list (preferred
-  --                                                    # if any path may have spaces)
-  -- {input} expands to the intermediate PDF path; {output} to the target
-  -- SVG path. When set, this takes precedence over svg-engine.
-  local svg_command = nil
-  local svg_command_raw = conf['svg-command']
-  if svg_command_raw then
-    local parts = {}
-    if pandoc.utils.type(svg_command_raw) == 'List' then
-      for _, item in ipairs(svg_command_raw) do
-        parts[#parts + 1] = stringify(item)
-      end
-    else
-      local s = stringify(svg_command_raw)
-      for word in s:gmatch('%S+') do
-        parts[#parts + 1] = word
-      end
-    end
-    if #parts > 0 then
-      svg_command = parts
-    else
-      log.warning("tikz: svg-command is empty; ignoring.")
-    end
-  end
-
-  local intermediate = intermediate_format(svg_engine, svg_command)
-  -- Setting both is a configuration mistake rather than a layered override,
-  -- so say which one is being ignored instead of silently picking.
-  if svg_command and conf['svg-engine'] then
+  -- Setting both is a configuration mistake rather than a layered override, so
+  -- say which one is being ignored instead of silently picking. Tested against
+  -- `raw`, not `conf`: the latter always carries the svg-engine default.
+  if conf['svg-command'] and raw['svg-engine'] then
     log.warning(
       "tikz: both svg-command and svg-engine are set; svg-command wins and " ..
-      "svg-engine '" .. svg_engine .. "' is ignored." ..
-      (svg_engine == 'dvisvgm'
+      "svg-engine '" .. conf['svg-engine'] .. "' is ignored." ..
+      (conf['svg-engine'] == 'dvisvgm'
         and " In particular the TeX run still produces a PDF, which is what " ..
             "{input} names — dvisvgm's DVI input is not available to a custom " ..
             "command. Remove one of the two settings."
@@ -1528,66 +1600,18 @@ local function configure (meta)
   -- Is the host document LaTeX? True for `format: pdf`, `beamer` and
   -- `format: latex` alike (verified: `is_format('pdf')` answers yes to all
   -- three), which is what `latex-passthrough` needs to know.
-  local host_is_latex = (quarto and quarto.doc and quarto.doc.is_format
+  conf.host_is_latex = (quarto and quarto.doc and quarto.doc.is_format
     and quarto.doc.is_format('pdf')) or false
 
   -- What we produce for that host: the intermediate PDF embedded directly
   -- under LaTeX, an SVG everywhere else. Doubles as the file extension.
-  --
-  -- Two questions, one variable, until now. `output_format == 'pdf'` was
-  -- read in three places to mean "embed the PDF", "skip the SVG converter"
-  -- and "the host is LaTeX, so passthrough applies" — three different
-  -- questions that happen to share an answer. Naming them separately costs
-  -- one field and stops the next reader having to work out which sense is
-  -- meant at each site.
-  local image_format = host_is_latex and 'pdf' or 'svg'
+  conf.image_format = conf.host_is_latex and 'pdf' or 'svg'
 
-  -- Rendering pipeline. 'latex' (default) runs the server-side TeX +
-  -- svg-engine chain configured above; 'tikzjax' emits a
-  -- <script type="text/tikz"> for client-side WebAssembly rendering in the
-  -- reader's browser. Per-block %%| renderer: … overrides.
-  local renderer = normalize_renderer(conf.renderer, 'tikz.renderer') or 'latex'
+  conf.pipeline = pipeline_for(conf.image_format, conf['svg-engine'],
+    conf['svg-command'])
 
-  -- Hand TikZ source to the host document instead of rendering it, whenever
-  -- the output format is LaTeX. Orthogonal to `renderer`, which still governs
-  -- every other output format. Per-block %%| latex-passthrough: … overrides.
-  local latex_passthrough = truthy(conf['latex-passthrough'])
-  if latex_passthrough == nil and conf['latex-passthrough'] ~= nil then
-    log.warning(
-      "tikz: latex-passthrough expects true or false, got '" ..
-      stringify(conf['latex-passthrough']) .. "'. Treating it as false."
-    )
-  end
-  latex_passthrough = latex_passthrough or false
-
-  -- Delivery of the rendered SVG under HTML output: 'img' (default) keeps the
-  -- historical `<img src=…>` reference; 'inline' emits the SVG as markup.
-  local embed = normalize_embed(conf.embed, 'tikz.embed') or 'img'
-
-  -- Base URL serving tikzjax.js and fonts.css. Defaults to the canonical
-  -- tikzjax.com CDN; users can self-host or pin a fork (e.g. drgrice1's).
-  local tikzjax_url = meta_string(conf, 'tikzjax-url', 'https://tikzjax.com/v1')
-  -- Strip a trailing slash so concatenation with /fonts.css and /tikzjax.js
-  -- produces a single separator regardless of how the user wrote the URL.
-  tikzjax_url = tikzjax_url:gsub('/+$', '')
-
-  return {
-    image_cache = image_cache,
-    save_tex = save_tex,
-    tex_dir = tex_dir,
-    texinputs = build_texinputs(),
-    tex_template_content = tex_template_content,
-    tex_engine = tex_engine,
-    svg_engine = svg_engine,
-    svg_command = svg_command,
-    intermediate = intermediate,
-    host_is_latex = host_is_latex,
-    image_format = image_format,
-    renderer = renderer,
-    latex_passthrough = latex_passthrough,
-    embed = embed,
-    tikzjax_url = tikzjax_url,
-  }
+  conf.texinputs = build_texinputs()
+  return conf
 end
 
 -- Helpers exercised by the suites under tests/. Mostly pure; the two that are
@@ -1602,21 +1626,23 @@ TIKZ_TEST = {
   namespace_svg = namespace_svg,
   compile_tikz_to_svg = compile_tikz_to_svg,
   write_file = write_file,
-  hashable_code = hashable_code,
+  split_directives = split_directives,
+  diagram_options = diagram_options,
   code_part = code_part,
   match_loader_line = match_loader_line,
-  meta_string = meta_string,
-  meta_enum = meta_enum,
   convert_command = convert_command,
   build_tex_document = build_tex_document,
   as_figure = as_figure,
-  cache_filename = cache_filename,
-  intermediate_format = intermediate_format,
+  artifact_name = artifact_name,
+  artifact_file = artifact_file,
+  pipeline_for = pipeline_for,
   check_dependency = check_dependency,
   find_executable = find_executable,
   resolve_axes = resolve_axes,
-  normalize_renderer = normalize_renderer,
-  normalize_embed = normalize_embed,
+  read_option = read_option,
+  resolve_option = resolve_option,
+  OPTIONS = OPTIONS,
+  configure = configure,
   split_libs = split_libs,
   prepare_passthrough_body = prepare_passthrough_body,
 }
@@ -1624,6 +1650,7 @@ TIKZ_TEST = {
 return {
   {
     Pandoc = function(doc)
+      reset_document_state()
       local conf = configure(doc.meta)
       local result = doc:walk {
         CodeBlock = code_to_figure(conf),

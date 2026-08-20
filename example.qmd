@@ -6,8 +6,6 @@ format:
   html: {}
 tikz:
   cache: false
-  save-tex: true  # Enable saving intermediate .tex files
-  tex-dir: tikz-tex  # Optional: Specify directory to save .tex files
 ---
 
 # Simple TikZ Diagram
@@ -39,9 +37,6 @@ Now, let's look at a more complex example [@fig-example] that uses additional pa
 ::: {#fig-example .test-class}
 ```{.tikz}
 %%| filename: my-fancy-diagram
-%%| fig-attr:
-%%|   id: fig-my-fancy-diagram
-%%|   class: my-class
 %%| additionalPackages: \usepackage{adjustbox}
 
 \usetikzlibrary{arrows, arrows.meta}

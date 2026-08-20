@@ -3,16 +3,8 @@
 -- Run from the repo root:   pandoc lua tests/test_errors.lua
 
 dofile('_extensions/tikz/tikz.lua')
-local failures, checks = 0, 0
-
-local function check(label, got, want)
-  checks = checks + 1
-  if got ~= want then
-    failures = failures + 1
-    io.write(('FAIL %s\n  expected: %s\n  actual:   %s\n')
-      :format(label, tostring(want), tostring(got)))
-  end
-end
+local t = dofile('tests/harness.lua')
+local check = t.check
 
 -- write_file must refuse a nil payload rather than let `fh:write` raise.
 -- That raise is a genuine runtime error, so unlike `error()` it propagates,
@@ -35,7 +27,8 @@ local compile = TIKZ_TEST.compile_tikz_to_svg
 local PIC = '\\begin{tikzpicture}\\draw (0,0);\\end{tikzpicture}'
 
 local data, msg = compile(PIC, {}, {
-  tex_engine = 'tikz-no-such-tex-engine', image_format = 'svg',
+  ['tex-engine'] = 'tikz-no-such-tex-engine', image_format = 'svg',
+  pipeline = {intermediate = 'pdf', convert = true},
 }, 'demo')
 check('missing tex engine returns no data', data, nil)
 check('missing tex engine explains itself',
@@ -45,8 +38,9 @@ check('missing tex engine names the engine',
 
 -- `sh` stands in for a TeX engine that exists, so the second check is reached.
 data, msg = compile(PIC, {}, {
-  tex_engine = 'sh', image_format = 'svg',
-  svg_command = {'tikz-no-such-converter', '{input}', '{output}'},
+  ['tex-engine'] = 'sh', image_format = 'svg',
+  ['svg-command'] = {'tikz-no-such-converter', '{input}', '{output}'},
+  pipeline = {intermediate = 'pdf', convert = true},
 }, 'demo')
 check('missing svg converter returns no data', data, nil)
 check('missing svg converter names the command',
@@ -54,8 +48,9 @@ check('missing svg converter names the command',
 
 -- For PDF output no converter is needed, so a bogus one must not be checked.
 data, msg = compile(PIC, {}, {
-  tex_engine = 'tikz-no-such-tex-engine', image_format = 'pdf',
-  svg_command = {'tikz-no-such-converter'},
+  ['tex-engine'] = 'tikz-no-such-tex-engine', image_format = 'pdf',
+  ['svg-command'] = {'tikz-no-such-converter'},
+  pipeline = {intermediate = 'pdf', convert = false},
 }, 'demo')
 check('pdf output does not require the svg converter',
   msg and msg:find('tikz-no-such-tex-engine', 1, true) ~= nil, true)
@@ -71,39 +66,53 @@ local function joined(conf)
 end
 check('inkscape is the default', (CC({}, FILES)), 'inkscape')
 check('inkscape reads the pdf and writes the svg',
-  joined({svg_engine = 'inkscape'}):find('d.pdf', 1, true) ~= nil, true)
+  joined({['svg-engine'] = 'inkscape'}):find('d.pdf', 1, true) ~= nil, true)
 check('dvisvgm reads the dvi',
-  joined({svg_engine = 'dvisvgm'}):find('d.dvi', 1, true) ~= nil, true)
+  joined({['svg-engine'] = 'dvisvgm'}):find('d.dvi', 1, true) ~= nil, true)
 check('dvisvgm does not read the pdf',
-  joined({svg_engine = 'dvisvgm'}):find('d.pdf', 1, true), nil)
+  joined({['svg-engine'] = 'dvisvgm'}):find('d.pdf', 1, true), nil)
 check('pdftocairo reads the pdf',
-  joined({svg_engine = 'pdftocairo'}), 'pdftocairo -svg d.pdf d.svg')
+  joined({['svg-engine'] = 'pdftocairo'}), 'pdftocairo -svg d.pdf d.svg')
 check('a custom command wins over the engine',
-  (CC({svg_engine = 'dvisvgm', svg_command = {'pdf2svg', '{input}', '{output}'}},
+  (CC({['svg-engine'] = 'dvisvgm', ['svg-command'] = {'pdf2svg', '{input}', '{output}'}},
       FILES)),
   'pdf2svg')
 check('…and its placeholders name the pdf, never the dvi',
-  joined({svg_engine = 'dvisvgm',
-          svg_command = {'pdf2svg', '{input}', '{output}'}}),
+  joined({['svg-engine'] = 'dvisvgm',
+          ['svg-command'] = {'pdf2svg', '{input}', '{output}'}}),
   'pdf2svg d.pdf d.svg')
 -- The substitutions are gsub replacements, so a '%' in a user-supplied
 -- `%%| filename:` must not be read as a capture reference.
 check('a percent in the filename survives substitution',
-  (select(2, CC({svg_command = {'x', '{input}'}},
+  (select(2, CC({['svg-command'] = {'x', '{input}'}},
                 {pdf = '100%.pdf', dvi = 'd.dvi', svg = 'd.svg'})))[1],
   '100%.pdf')
 
--- Which intermediate file the TeX run must leave behind. `svg-command`
--- overrides `svg-engine` at conversion time and its {input} names the PDF, so
--- setting both used to produce a DVI and then look for a PDF that was never
--- written — a missing-file error naming neither cause.
-local I = TIKZ_TEST.intermediate_format
-check('inkscape reads the pdf', I('inkscape', nil), 'pdf')
-check('pdftocairo reads the pdf', I('pdftocairo', nil), 'pdf')
-check('dvisvgm reads the dvi', I('dvisvgm', nil), 'dvi')
-check('a custom command reads the pdf', I('inkscape', {'pdf2svg'}), 'pdf')
+-- The shape of one render: what the TeX run must leave behind, and whether a
+-- converter runs over it. Two decisions that used to be taken separately from
+-- overlapping inputs, and could contradict each other.
+local P = TIKZ_TEST.pipeline_for
+check('inkscape reads the pdf', P('svg', 'inkscape', nil).intermediate, 'pdf')
+check('pdftocairo reads the pdf', P('svg', 'pdftocairo', nil).intermediate, 'pdf')
+check('dvisvgm reads the dvi', P('svg', 'dvisvgm', nil).intermediate, 'dvi')
+-- `svg-command` overrides `svg-engine` at conversion time and its {input}
+-- names the PDF, so setting both must not ask for a DVI.
+check('a custom command reads the pdf',
+  P('svg', 'inkscape', {'pdf2svg'}).intermediate, 'pdf')
 check('a custom command reads the pdf even under dvisvgm',
-  I('dvisvgm', {'pdf2svg', '{input}', '{output}'}), 'pdf')
+  P('svg', 'dvisvgm', {'pdf2svg', '{input}', '{output}'}).intermediate, 'pdf')
+check('an svg deliverable is converted', P('svg', 'inkscape', nil).convert, true)
+
+-- The regression: under LaTeX output the intermediate IS the deliverable and
+-- no converter runs, so `svg-engine` must not drag the TeX run to DVI. It did,
+-- and every diagram in a `format: pdf` document with `svg-engine: dvisvgm`
+-- failed reading a PDF that was never written.
+check('pdf output never asks for a dvi',
+  P('pdf', 'dvisvgm', nil).intermediate, 'pdf')
+check('…and runs no converter', P('pdf', 'dvisvgm', nil).convert, false)
+check('pdf output with a custom command runs no converter either',
+  P('pdf', 'inkscape', {'pdf2svg'}).convert, false)
+check('pdf output embeds the pdf', P('pdf', 'inkscape', nil).intermediate, 'pdf')
 
 -- The dependency probe searches PATH itself. It used to ask a shell
 -- (`command -v`), which put a metadata-controlled string inside a shell
@@ -132,17 +141,24 @@ check('memoized probe is stable across calls',
 -- `pandoc lua`, where the `quarto` global does not exist, so every check
 -- below would previously have died with "attempt to index a nil value
 -- (global 'quarto')" — the filter aborting while trying to report a mistake.
-local ok, err = pcall(TIKZ_TEST.normalize_renderer, 'bogus', '%%| renderer:')
+local RO = TIKZ_TEST.read_option
+local ok, err = pcall(RO, 'renderer', 'bogus', '%%| renderer:')
 check('warning path does not raise without quarto', ok, true)
 check('unknown renderer is rejected', err, nil)
-check('known renderer survives',
-  TIKZ_TEST.normalize_renderer('tikzjax', '%%| renderer:'), 'tikzjax')
-ok, err = pcall(TIKZ_TEST.normalize_embed, 'bogus', '%%| embed:')
+check('known renderer survives', RO('renderer', 'tikzjax', '%%| renderer:'),
+  'tikzjax')
+ok, err = pcall(RO, 'embed', 'bogus', '%%| embed:')
 check('embed warning path does not raise without quarto', ok, true)
 check('unknown embed is rejected', err, nil)
 -- The retired renderer name has its own migration warning; same crash before.
-ok = pcall(TIKZ_TEST.normalize_renderer, 'latex-passthrough', 'tikz.renderer')
+ok = pcall(RO, 'renderer', 'latex-passthrough', 'tikz.renderer')
 check('migration warning does not raise without quarto', ok, true)
+-- A boolean and a list travel the same path, so they must survive it too.
+ok = pcall(RO, 'cache', 'perhaps', 'tikz.cache')
+check('boolean warning path does not raise without quarto', ok, true)
+ok = pcall(RO, 'svg-command', '  ', 'tikz.svg-command')
+check('empty-list warning path does not raise without quarto', ok, true)
+ok = pcall(RO, 'svg-command', 'pdf2svg', 'tikz.svg-command')
+check('invalid-list warning path does not raise without quarto', ok, true)
 
-print(('%d checks, %d failures'):format(checks, failures))
-os.exit(failures == 0 and 0 or 1)
+t.done()
