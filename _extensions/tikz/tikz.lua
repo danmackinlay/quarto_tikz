@@ -165,21 +165,7 @@ local function properties_from_code (code, comment_start)
   local pattern = comment_start:gsub('%p', '%%%1') .. '| ?' ..
     '([-_%w]+): ([^\n]*)\n'
   for key, value in code:gmatch(pattern) do
-    if key == 'fig-attr' then
-      -- Handle nested attributes for fig-attr
-      local attr_value = ''
-      local subpattern = comment_start:gsub('%p', '%%%1') .. '|   ([^\n]+)\n'
-      for subvalue in code:gmatch(subpattern) do
-        attr_value = attr_value .. subvalue .. '\n'
-      end
-      -- Parse the YAML-like subattributes
-      local parsed = pandoc.read(attr_value, 'yaml').blocks
-      if #parsed > 0 then
-        props[key] = pandoc.utils.block_to_lua(parsed[1])
-      end
-    else
-      props[key] = value
-    end
+    props[key] = value
   end
   return props
 end
@@ -300,7 +286,7 @@ local function diagram_options(cb)
 
   local alt
   local caption
-  local fig_attr = attribs['fig-attr'] or { id = cb.identifier }
+  local fig_attr = { id = cb.identifier }
   local filename
   local image_attr = {}
   local user_opt = {}
@@ -320,8 +306,6 @@ local function diagram_options(cb)
       fig_attr.id = value
     elseif attr_name == 'name' then
       fig_attr.name = value
-    elseif attr_name == 'fig-attr' then
-      -- Already handled
     else
       -- Check for prefixed attributes
       local prefix, key = attr_name:match '^(%a+)%-(%a[-%w]*)$'
