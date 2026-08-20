@@ -65,6 +65,51 @@ local kept = N([[<svg class="keep"></svg>]], 'n')
 check('existing root class is namespaced', has(kept, 'keep-n'), true)
 check('hook appended alongside it', has(kept, 'class="keep-n tikz-svg"'), true)
 
+-- Selector shapes. One pattern now covers all of them; the old
+-- `(%.)@(%s*{)` required the brace to follow the name, so a grouped selector
+-- was skipped while the `class=` attributes it applied to were still renamed
+-- — silently detaching the style from the elements.
+local grouped = N([[<svg><style>.f0, .f1 {fill:red}</style><text class='f0'/><text class='f1'/></svg>]], 'n')
+check('grouped selector: first name', has(grouped, '.f0-n,'), true)
+check('grouped selector: second name', has(grouped, '.f1-n {'), true)
+check('…and both attributes agree', has(grouped, "class='f0-n'"), true)
+check('minified selector renamed',
+  has(N([[<svg><style>text.f0{x:1}</style><text class='f0'/></svg>]], 'n'),
+      'text.f0-n{'), true)
+-- A name nothing carries is not a class, so it is left alone.
+check('an unused selector name is untouched',
+  has(N([[<svg><style>.ghost {x:1}</style><text class='f0'/></svg>]], 'n'),
+      '.ghost '), true)
+-- A decimal in path data must not be mistaken for a selector.
+check('path data is not a selector',
+  has(N([[<svg><style>.f0{x:1}</style><path d='M 0.5 1.2' class='f0'/></svg>]], 'n'),
+      "d='M 0.5 1.2'"), true)
+
+-- A class attribute may carry several names, so they are namespaced token by
+-- token. Treating the attribute as one name meant it matched nothing at all.
+local multi = N([[<svg><style>.f0 {x:1}</style><text class='f0 bold'/></svg>]], 'n')
+check('every token in a class list is namespaced',
+  has(multi, "class='f0-n bold-n'"), true)
+check('…and the selector still agrees', has(multi, '.f0-n {'), true)
+
+-- The root tag. `<svg[^>]*>` stopped at the first `>` whatever it was.
+local selfclosed = N([[<svg width="1"/>]], 'n', 'Alt text')
+check('a self-closing root is opened up',
+  has(selfclosed, '<title>Alt text</title></svg>'), true)
+check('…so no self-closing root is left behind',
+  has(selfclosed, '/>'), false)
+local gt = N([[<svg data-x="a>b" ><g id="q"/></svg>]], 'n', 'T')
+check('a > inside an attribute does not end the tag',
+  has(gt, 'data-x="a>b"'), true)
+check('…so the title lands after the tag, not inside it',
+  has(gt, '><title>T</title>'), true)
+
+-- Names never reach a Lua pattern, so nothing needs escaping. A literal '%'
+-- in an id was the shape that broke the old double-escaping dance.
+local pct = N([[<svg><g id="a%b"/><use href="#a%b"/></svg>]], 'n')
+check('a percent in an id survives', has(pct, 'id="a%b-n"'), true)
+check('…and its reference follows', has(pct, 'href="#a%b-n"'), true)
+
 -- as_figure: every renderer ends the same way. Three produce a RawBlock,
 -- which Figure takes directly; the <img> path produces an Image, which is an
 -- Inline and needs a Plain around it. Four copies of this used to say so

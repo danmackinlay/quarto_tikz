@@ -914,10 +914,6 @@ end
 -- would then share ids as well.
 local inline_svg_seq = 0
 
--- Escape a string for use as a Lua pattern / as a gsub replacement.
-local function pat_escape(s) return (s:gsub('(%W)', '%%%1')) end
-local function rep_escape(s) return (s:gsub('%%', '%%%%')) end
-
 -- Rewrite an SVG so it can be dropped into an HTML page beside others.
 --
 -- Inside an `<img>` an SVG is its own document: its ids, CSS classes and
@@ -945,78 +941,113 @@ local function namespace_svg(svg, nonce, alt)
   if not root then return nil end
   svg = svg:sub(root)
 
-  local function rename(names, rewrites)
-    for name in pairs(names) do
-      -- `from` is spliced into a pattern by an inner gsub, so it has to survive
-      -- being a *replacement* first: pat_escape('glyph-0-0') is 'glyph%-0%-0',
-      -- and a bare '%-' in a replacement string is an error.
-      local from = rep_escape(pat_escape(name))
-      local to = rep_escape(rep_escape(name .. '-' .. nonce))
-      for _, r in ipairs(rewrites) do
-        svg = svg:gsub(r[1]:gsub('@', from), (r[2]:gsub('@', to)))
-      end
-    end
+  -- The namespaced form of `name`, or nil when it is not one we collected —
+  -- and nil is what tells `gsub` to leave the match alone. Every pattern below
+  -- is therefore free to be written broadly: the lookup, not the pattern, is
+  -- what decides whether something is renamed.
+  local function ns(names, name)
+    if not names[name] then return nil end
+    return name .. '-' .. nonce
   end
+  local function sub(pattern, f) svg = svg:gsub(pattern, f) end
 
-  -- ids, and the three ways one SVG refers to another element. The patterns
-  -- are anchored on the closing quote or paren, so an id that is a prefix of
-  -- another (`clip-0` inside `clip-01`) cannot be partially rewritten.
-  local ids = {}
-  for q, name in svg:gmatch('id%s*=%s*(["\'])(.-)%1') do
+  -- Collect every name first, then rewrite. Collecting as we go would read a
+  -- document already half-rewritten.
+  local ids, classes, families = {}, {}, {}
+  for _, name in svg:gmatch('id%s*=%s*(["\'])(.-)%1') do
     if name ~= '' then ids[name] = true end
   end
-  rename(ids, {
-    { '(id%s*=%s*["\'])@(["\'])',   '%1@%2' },
-    { 'url%(#@%)',                  'url(#@)' },
-    { '(href%s*=%s*["\'])#@(["\'])', '%1#@%2' },
-  })
-
-  -- CSS class names: the `class='f0'` attribute and the `.f0 {` selector.
-  -- Only single-class attributes are matched; no converter we support emits
-  -- multiple classes on one element.
-  local classes = {}
-  for name in svg:gmatch('class%s*=%s*["\']([%w_%-]+)["\']') do classes[name] = true end
-  rename(classes, {
-    { '(class%s*=%s*["\'])@(["\'])', '%1@%2' },
-    { '(%.)@(%s*{)',                 '%1@%2' },
-  })
-
-  -- `@font-face` families, and both ways a family is referenced.
-  local families = {}
+  -- A `class` attribute may carry several names, so they are collected — and
+  -- rewritten below — token by token. Treating the attribute as a single name
+  -- meant `class="f0 bold"` matched nothing while the `.f0` selector was still
+  -- renamed, silently detaching the style from the element.
+  for value in svg:gmatch('class%s*=%s*["\']([^"\']*)["\']') do
+    for token in value:gmatch('%S+') do classes[token] = true end
+  end
   for name in svg:gmatch('@font%-face%s*{%s*font%-family%s*:%s*([%w_%-]+)') do
     families[name] = true
   end
-  rename(families, {
-    { '(font%-family%s*:%s*)@([;}])',       '%1@%2' },
-    { '(font%-family%s*=%s*["\'])@(["\'])', '%1@%2' },
-  })
+
+  -- ids, and the three ways one SVG refers to another element. The name
+  -- arrives as a capture and the surroundings are rebuilt around it, so an id
+  -- that is a prefix of another (`clip-0` inside `clip-01`) cannot be
+  -- partially rewritten.
+  sub('(id%s*=%s*["\'])([^"\']*)(["\'])', function(a, name, b)
+    local t = ns(ids, name); return t and (a .. t .. b) or nil
+  end)
+  sub('url%(#([^)]*)%)', function(name)
+    local t = ns(ids, name); return t and ('url(#' .. t .. ')') or nil
+  end)
+  sub('(href%s*=%s*["\'])#([^"\']*)(["\'])', function(a, name, b)
+    local t = ns(ids, name); return t and (a .. '#' .. t .. b) or nil
+  end)
+
+  -- CSS class names: the `class='f0 bold'` attribute and the `.f0` selector.
+  -- One pattern covers every selector shape — `.f0 {`, `.f0{`, and the
+  -- `.f0, .f1 {` group that the old `(%.)@(%s*{)` silently skipped while
+  -- renaming the attributes it applied to.
+  sub('(class%s*=%s*["\'])([^"\']*)(["\'])', function(a, value, b)
+    local out = {}
+    for token in value:gmatch('%S+') do out[#out + 1] = ns(classes, token) or token end
+    if #out == 0 then return nil end
+    return a .. table.concat(out, ' ') .. b
+  end)
+  sub('%.([%w_%-]+)', function(name)
+    local t = ns(classes, name); return t and ('.' .. t) or nil
+  end)
+
+  -- `@font-face` families, and both ways a family is referenced.
+  sub('(font%-family%s*:%s*)([%w_%-]+)([;}])', function(a, name, b)
+    local t = ns(families, name); return t and (a .. t .. b) or nil
+  end)
+  sub('(font%-family%s*=%s*["\'])([^"\']*)(["\'])', function(a, name, b)
+    local t = ns(families, name); return t and (a .. t .. b) or nil
+  end)
+
+  -- Where the root `<svg …>` tag ends: the first `>` that is not inside a
+  -- quoted attribute value. `<svg[^>]*>` stopped at the first `>` whatever it
+  -- was, so `<svg data-x="a>b">` had the <title> spliced into the middle of
+  -- the attribute.
+  local stop
+  do
+    local quote
+    for i = 1, #svg do
+      local c = svg:sub(i, i)
+      if quote then
+        if c == quote then quote = nil end
+      elseif c == '"' or c == "'" then quote = c
+      elseif c == '>' then stop = i break end
+    end
+  end
+  if not stop then return svg end
+
+  local head, rest = svg:sub(1, stop), svg:sub(stop + 1)
+  -- A self-closing root has no inside to put a <title> in, so open it up.
+  -- Only an empty diagram produces one, but appending to `<svg …/>` put the
+  -- title outside the element entirely.
+  if head:match('/%s*>$') then
+    head = head:gsub('/%s*>$', '>')
+    rest = '</svg>' .. rest
+  end
 
   -- Give the page a styling hook, and the accessibility tree a name. `<title>`
   -- rather than `role="img"` + `aria-label`, which would hide the very text
   -- that inlining exists to expose.
-  local head, rest = svg:match('^(<svg[^>]*>)(.*)$')
-  if head then
-    -- Added after the renaming pass, so the hook is a stable page-wide
-    -- selector rather than another namespaced name. A class already on the
-    -- root has been namespaced like any other by this point; keep it and
-    -- append, rather than replacing what the converter put there.
-    local existing = head:match('class%s*=%s*["\']([^"\']*)["\']')
-    if existing then
-      -- Pattern built by concatenation, so only pat_escape here; the
-      -- replacement half still needs rep_escape.
-      head = head:gsub('(class%s*=%s*["\'])' .. pat_escape(existing),
-                       '%1' .. rep_escape(existing) .. ' tikz-svg', 1)
-    else
-      head = head:gsub('^<svg', '<svg class="tikz-svg"', 1)
-    end
-    local title = alt and stringify(alt) or ''
-    if title ~= '' then
-      title = title:gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;')
-      head = head .. '<title>' .. title .. '</title>'
-    end
-    svg = head .. rest
+  --
+  -- The hook is added after the renaming pass, so it is a stable page-wide
+  -- selector rather than another namespaced name. A class already on the root
+  -- has been namespaced like any other by this point; keep it and append.
+  local hooked, n = head:gsub('(class%s*=%s*["\'])([^"\']*)(["\'])',
+    function(a, value, b) return a .. value .. ' tikz-svg' .. b end, 1)
+  if n == 0 then hooked = head:gsub('^<svg', '<svg class="tikz-svg"', 1) end
+  head = hooked
+
+  local title = alt and stringify(alt) or ''
+  if title ~= '' then
+    title = title:gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;')
+    head = head .. '<title>' .. title .. '</title>'
   end
-  return svg
+  return head .. rest
 end
 
 -- The shape of one LaTeX render: what the TeX run must leave behind, and
@@ -1086,14 +1117,14 @@ end
 local function convert_command(conf, files)
   if conf['svg-command'] then
     -- Element 1 is the executable; the rest are its arguments, with
-    -- {input}/{output} substituted. rep_escape because these are gsub
-    -- *replacements*: a '%' in a user-supplied `filename` would otherwise be
-    -- read as a capture reference.
+    -- {input}/{output} substituted. Function replacements, because a plain
+    -- one would read a '%' in a user-supplied `filename` as a capture
+    -- reference; a function's return value is used verbatim.
     local args = {}
     for i = 2, #conf['svg-command'] do
       args[#args + 1] = conf['svg-command'][i]
-        :gsub('{input}', rep_escape(files.pdf))
-        :gsub('{output}', rep_escape(files.svg))
+        :gsub('{input}', function() return files.pdf end)
+        :gsub('{output}', function() return files.svg end)
     end
     return conf['svg-command'][1], args
   end
