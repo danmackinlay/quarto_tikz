@@ -863,6 +863,22 @@ local function namespace_svg(svg, nonce, alt)
   return svg
 end
 
+-- What the TeX run has to leave behind for the SVG converter to read.
+--
+-- Only `dvisvgm` consumes a DVI, and only when it is the converter that will
+-- actually run. `svg-command` takes precedence over `svg-engine` at
+-- conversion time, and its `{input}` is documented as the intermediate PDF,
+-- so a custom command always gets a PDF. Deciding this from `svg_engine`
+-- alone was the bug: `svg-engine: dvisvgm` together with `svg-command:` asked
+-- the TeX engine for DVI and then handed the converter an `{input}` naming a
+-- PDF that was never written, failing with a missing-file error that named
+-- neither cause.
+local function intermediate_format(svg_engine, svg_command)
+  if svg_command then return 'pdf' end
+  if svg_engine == 'dvisvgm' then return 'dvi' end
+  return 'pdf'
+end
+
 -- Compile TikZ code to either SVG (default) or PDF (passthrough, used when
 -- the Quarto output format is PDF).
 --
@@ -953,7 +969,13 @@ $body$
       -- in that case. Every other path (inkscape, pdftocairo, custom
       -- svg-command, PDF passthrough) consumes the default PDF output.
       local latex_args = { '-interaction=nonstopmode' }
-      if conf.svg_engine == 'dvisvgm' then
+      -- Ask for DVI only when the converter we are actually going to run
+      -- consumes one. Keying this off `svg_engine` alone was wrong: a custom
+      -- `svg-command` overrides the engine at conversion time, so
+      -- `svg-engine: dvisvgm` plus `svg-command:` produced a DVI and then
+      -- handed the converter a `{input}` naming a PDF that was never
+      -- written.
+      if conf.intermediate == 'dvi' then
         table.insert(latex_args, '-output-format=dvi')
       end
       table.insert(latex_args, tikz_file)
@@ -993,9 +1015,11 @@ $body$
         convert_cmd = conf.svg_command[1]
         convert_args = {}
         for i = 2, #conf.svg_command do
+          -- rep_escape because these are gsub *replacements*: a '%' in a
+          -- user-supplied `filename` would otherwise be a capture reference.
           local arg = conf.svg_command[i]
-            :gsub('{input}', pdf_file)
-            :gsub('{output}', svg_file)
+            :gsub('{input}', rep_escape(pdf_file))
+            :gsub('{output}', rep_escape(svg_file))
           convert_args[#convert_args + 1] = arg
         end
       elseif conf.svg_engine == 'dvisvgm' then
@@ -1462,6 +1486,21 @@ local function configure (meta)
     end
   end
 
+  local intermediate = intermediate_format(svg_engine, svg_command)
+  -- Setting both is a configuration mistake rather than a layered override,
+  -- so say which one is being ignored instead of silently picking.
+  if svg_command and conf['svg-engine'] then
+    log.warning(
+      "tikz: both svg-command and svg-engine are set; svg-command wins and " ..
+      "svg-engine '" .. svg_engine .. "' is ignored." ..
+      (svg_engine == 'dvisvgm'
+        and " In particular the TeX run still produces a PDF, which is what " ..
+            "{input} names — dvisvgm's DVI input is not available to a custom " ..
+            "command. Remove one of the two settings."
+        or " Remove one of the two settings to silence this warning.")
+    )
+  end
+
   -- Output format: 'pdf' when the Quarto output format is PDF, otherwise
   -- 'svg'. Drives whether we run the SVG engine or embed the PDF directly.
   local out_format = 'svg'
@@ -1510,6 +1549,7 @@ local function configure (meta)
     tex_engine = tex_engine,
     svg_engine = svg_engine,
     svg_command = svg_command,
+    intermediate = intermediate,
     output_format = out_format,
     renderer = renderer,
     latex_passthrough = latex_passthrough,
@@ -1529,6 +1569,7 @@ TIKZ_TEST = {
   hashable_code = hashable_code,
   code_part = code_part,
   match_loader_line = match_loader_line,
+  intermediate_format = intermediate_format,
   check_dependency = check_dependency,
   find_executable = find_executable,
   resolve_axes = resolve_axes,

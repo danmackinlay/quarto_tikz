@@ -60,6 +60,18 @@ data, msg = compile(PIC, {}, {
 check('pdf output does not require the svg converter',
   msg and msg:find('tikz-no-such-tex-engine', 1, true) ~= nil, true)
 
+-- Which intermediate file the TeX run must leave behind. `svg-command`
+-- overrides `svg-engine` at conversion time and its {input} names the PDF, so
+-- setting both used to produce a DVI and then look for a PDF that was never
+-- written — a missing-file error naming neither cause.
+local I = TIKZ_TEST.intermediate_format
+check('inkscape reads the pdf', I('inkscape', nil), 'pdf')
+check('pdftocairo reads the pdf', I('pdftocairo', nil), 'pdf')
+check('dvisvgm reads the dvi', I('dvisvgm', nil), 'dvi')
+check('a custom command reads the pdf', I('inkscape', {'pdf2svg'}), 'pdf')
+check('a custom command reads the pdf even under dvisvgm',
+  I('dvisvgm', {'pdf2svg', '{input}', '{output}'}), 'pdf')
+
 -- The dependency probe searches PATH itself. It used to ask a shell
 -- (`command -v`), which put a metadata-controlled string inside a shell
 -- command and, because `command -v` is a POSIX builtin, reported every

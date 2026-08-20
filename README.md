@@ -751,7 +751,10 @@ front-matter or `_quarto.yml`):
   element is the executable; subsequent elements are arguments, with
   `{input}` and `{output}` substituted with the intermediate PDF and
   the target SVG paths respectively. When set, `svg-command` takes
-  precedence over `svg-engine`.
+  precedence over `svg-engine` — setting both warns, and `svg-engine`
+  is ignored. In particular `{input}` is always a PDF: a custom command
+  cannot consume the DVI that `svg-engine: dvisvgm` would otherwise ask
+  the TeX engine for.
 
   Two YAML forms are accepted; prefer the list form if any path may
   contain whitespace:
