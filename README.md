@@ -95,7 +95,7 @@ pattern the bundled [`example.qmd`](example.qmd) uses.
 
 ## Renderers
 
-Two rendering pipelines are available; both consume the same `.tikz` block syntax, so you can switch between them without rewriting blocks.
+Two rendering pipelines are available; both consume the same `.tikz` block syntax, so you can switch between them without rewriting blocks. They answer *how* a diagram is drawn. A separate option, [`latex-passthrough`](#latex-passthrough), answers *whether* to draw it at all — under LaTeX output you can hand the source to the host document instead. The two are independent, so a project can pass source through to its PDF build and still render the same diagrams for the web.
 
 - **`renderer: latex`** (default) — compiles each block server-side via the configured `tex-engine` (default `pdflatex`) and, for non-PDF outputs, the configured `svg-engine` (default `inkscape`). For PDF output, the intermediate PDF is embedded directly. Works for every output format Quarto supports. Requires a TeX distribution; for non-PDF outputs also a PDF/DVI → SVG converter.
 - **`renderer: tikzjax`** — emits a `<script type="text/tikz">…</script>` tag and loads [TikZJax](https://github.com/artisticat1/obsidian-tikzjax) so the reader's browser renders the diagram client-side via WebAssembly. **No LaTeX or SVG converter needed**, but only works for HTML output and adds ~3 MB of JS/WASM to the first page load. Non-HTML outputs (PDF, docx, …) drop `tikzjax` blocks with a warning — use `renderer: latex` for those.
@@ -125,6 +125,136 @@ tikz:
 ```
 
 The supplied URL must serve both `tikzjax.js` and `fonts.css` at its root.
+
+### LaTeX passthrough
+
+Under LaTeX output, `latex-passthrough` hands the TikZ source to the
+host document as raw LaTeX instead of compiling it. The diagram is
+typeset by the same LaTeX run as the surrounding text, so no standalone
+compile happens, no figure files are produced and no `\includegraphics`
+is emitted. Fonts and sizing match the document automatically, the
+shipped `.tex` keeps the diagram's source rather than an opaque binary,
+and the source package stays small — a couple of KB of TikZ against tens
+of KB of rendered PDF, which is what an arXiv-style source submission
+wants.
+
+```yaml
+tikz:
+  latex-passthrough: true
+```
+
+…or per-block, mixing freely with compiled blocks in the same document:
+
+````markdown
+```{.tikz}
+%%| latex-passthrough: true
+\begin{tikzpicture}…\end{tikzpicture}
+```
+````
+
+**It is not a renderer, and deliberately so.** It applies to exactly one
+output family — `quarto.doc.isFormat('pdf')`, which covers `format: pdf`
+and `format: latex` alike — and says nothing about the others. On every
+other format `renderer` still decides, with no fallback for this filter
+to invent. So the flag is safe to set project-wide, and the combination
+you probably want for a paper with a web preview is two lines:
+
+```yaml
+tikz:
+  renderer: tikzjax        # HTML: rendered in the reader's browser
+  latex-passthrough: true  # LaTeX: source handed to the host document
+```
+
+That builds the PDF with no TeX subprocess and the site with no TeX
+installed at all. With the default `renderer: latex` instead, the HTML
+build compiles each diagram to SVG as usual.
+
+If you need finer control — a different renderer per output format
+rather than per block — that is Quarto's job rather than this filter's;
+`tikz:` merges from format-level metadata like any other key:
+
+```yaml
+format:
+  html:
+    tikz: {renderer: tikzjax}
+  pdf:
+    tikz: {latex-passthrough: true}
+```
+
+**What reaches the preamble.** The standalone wrapper used to supply
+things the host document doesn't, so the filter hoists them via
+`include-in-header`:
+
+- `\usepackage{tikz}` — Quarto's default LaTeX template does not load
+  TikZ, so the filter adds it as soon as one passthrough block exists.
+- The block's `%%| additionalPackages:` and `%%| header-includes:`
+  text, verbatim.
+- Every `\usetikzlibrary{…}` in the block body, and likewise
+  `\usepgfplotslibrary`, `\usepgflibrary` and `\usetikzmarklibrary`.
+  Libraries are emitted one per line, so
+  `\usetikzlibrary{arrows, arrows.meta}` becomes two preamble lines.
+
+  How the call is written decides whether it is *moved* or *copied*. A
+  line that is exactly one library load — leading whitespace and a
+  trailing `%` comment are fine — is hoisted and **removed** from the
+  body, which keeps the shipped `.tex` tidy. A load that shares its line
+  with other code cannot be excised without risking the drawing, so it
+  is **copied**: the preamble gets the load and the body keeps its own.
+  That is safe because PGF's loaders are idempotent — the preamble load
+  wins and the body copy becomes a no-op.
+
+  Copying is not merely tidiness. `\usetikzlibrary` is legal in the
+  document body, but a **captioned** block is emitted inside a `figure`
+  environment, and PGF records "library loaded" *globally* while the
+  library's own definitions are local to the current group. A library
+  loaded in there is therefore discarded at `\end{figure}` while every
+  later load of it is suppressed — so a *different, later* block fails,
+  with an error naming PGF math rather than library loading.
+
+  Three cases are reported rather than hoisted, because relocating them
+  could break the document: a loader **inside** a `tikzpicture` (it may
+  be part of the drawing, and inventing a library name is a hard error),
+  one whose argument does not brace-balance, and `\usepackage` or
+  `\usegdlibrary` anywhere in the body. Each produces a warning naming
+  the block and the line. Put those in `%%| additionalPackages:`, which
+  is hoisted verbatim and always works.
+
+Hoisted text is deduplicated by exact string, which is what makes it
+safe for a dozen blocks to open with the same library loads: identical
+lines collapse to one, and anything that differs is emitted in full
+rather than merged. Two blocks whose `additionalPackages` differ only
+partially therefore emit both lines — harmless for a repeated
+`\usepackage{x}`, but an options clash (`\usepackage[a]{x}` in one
+block, `\usepackage[b]{x}` in another) is a LaTeX error, so keep
+package options consistent across a document.
+
+The `%%|` directive lines themselves are stripped from the emitted
+LaTeX; they are filter input, not part of the picture.
+
+**Captions.** A block with `%%| caption:` becomes a `pandoc.Figure`,
+exactly as on the other two renderers, which pandoc writes as a
+`figure` environment with `\centering` and a `\caption`. A block
+without a caption is emitted bare — no float, no centring — leaving
+placement to the caller. (The cross-referencing caveats in
+[Captions and cross-references](#captions-and-cross-references) apply
+here too.)
+
+That `figure` environment is a TeX group, so a `\tikzset` left in the
+body of a captioned block applies only to that block, while the same
+`\tikzset` in an uncaptioned block leaks to the rest of the document.
+Under `renderer: latex` every block was its own `standalone` compile and
+neither shared anything, so if you want a style available document-wide,
+put it in `%%| header-includes:` rather than relying on either.
+
+**What passthrough ignores.** Nothing is compiled, so `cache`,
+`save-tex`, `tex-engine`, `tex-template`, `svg-engine` and
+`svg-command` have no effect on passthrough blocks. Neither do
+`filename` and `alt`, which name and describe an image file that is
+never produced, nor image attributes such as `width` — scale the picture
+from inside the block instead (`\begin{tikzpicture}[scale=2]`). Sharing styles by
+`\input`-ing a file still works, but resolution is now the host LaTeX
+run's business (the filter's `TEXINPUTS` handling doesn't apply), so
+keep such files next to the `.tex` you compile.
 
 ## Sharing styles between diagrams
 
@@ -284,10 +414,16 @@ converter to produce an embedded SVG. See the
 [configuration reference](#configuration-reference) for `tex-engine`,
 `svg-engine`, and `svg-command`.
 
+If you'd rather ship the TikZ source than an embedded PDF — no figure
+files, matched fonts, an editable `.tex` — set
+`latex-passthrough: true`; see [LaTeX passthrough](#latex-passthrough).
+
 Blocks with `renderer: tikzjax` are dropped (with a warning) under PDF
-or any other non-HTML output, since client-side JS can't run there.
-Mixing the two renderers in the same document is fine — only the
-tikzjax-tagged blocks are skipped.
+or any other non-HTML output, since client-side JS can't run there —
+unless `latex-passthrough: true`, which is checked first and hands the
+source to the host document, so a tikzjax project still gets its
+diagrams into the PDF. Mixing renderers in the same document is fine —
+only the tikzjax-tagged blocks are skipped.
 
 Other features discussed in
 [#5](https://github.com/danmackinlay/quarto_tikz/issues/5) (alternative
@@ -548,7 +684,13 @@ front-matter or `_quarto.yml`):
 - `renderer` — string, default `latex`. Picks the rendering pipeline:
   `latex` (server-side `tex-engine` + `svg-engine` chain above) or
   `tikzjax` (client-side WebAssembly rendering, HTML output only). See
-  [Renderers](#renderers).
+  [Renderers](#renderers). An unrecognized value warns and falls back to
+  `latex`.
+- `latex-passthrough` — boolean, default `false`. Under LaTeX output
+  (`format: pdf` or `format: latex`), emit the TikZ source into the host
+  document instead of rendering it; `renderer` continues to govern every
+  other output format. Independent of `renderer`, so the two can be set
+  together. See [LaTeX passthrough](#latex-passthrough).
 - `tikzjax-url` — string, default `https://tikzjax.com/v1`. Base URL
   for the TikZJax `tikzjax.js` and `fonts.css` assets when
   `renderer: tikzjax`. Override to self-host or pin a fork.
@@ -570,10 +712,16 @@ don't set the same option in both places:
   `class`, etc.). Not dependably honoured for cross-references; see
   [Captions and cross-references](#captions-and-cross-references).
 - `additionalPackages` — extra `\usepackage{…}` lines added to the
-  preamble of the synthesized LaTeX document.
-- `header-includes` — additional raw LaTeX inserted into the preamble.
+  preamble of the synthesized LaTeX document (under
+  `latex-passthrough`, to the host document's preamble).
+- `header-includes` — additional raw LaTeX inserted into the preamble
+  (same destinations as `additionalPackages`).
 - `renderer` — `latex` or `tikzjax`. Per-block override of the
   document-level renderer.
+- `latex-passthrough` — `true` or `false`. Per-block override of the
+  document-level setting, so a single diagram can be passed through in
+  an otherwise compiled document, or compiled in an otherwise
+  passed-through one.
 
 Attributes prefixed with `fig-`, `image-`/`img-`, or `opt-` on the code
 block fence are routed to the figure, the image, or the per-block
@@ -706,6 +854,18 @@ If you forget step 2 and push a `.tikz` change without re-rendering,
 the build host gets a cache miss, fails the dependency check, logs
 an error, and emits the raw code block in place of the diagram. The
 build itself succeeds — the missing diagram is your signal.
+
+## Tests
+
+The pure helpers behind `latex-passthrough` — comment stripping,
+library-loader matching, and the move/copy split — have unit tests. Run them
+from the repo root:
+
+```sh
+pandoc lua tests/test_passthrough.lua
+```
+
+They need nothing beyond `pandoc`, which the extension already requires.
 
 ## Credits
 
