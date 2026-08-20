@@ -224,8 +224,43 @@ end
 -- block's code (40 hex chars), we use a short literal label instead;
 -- repeating the full content hash inside the filename adds no diagnostic
 -- value and bloats the listing.
+--
+-- The key is built from a canonical encoding of the options rather than from
+-- `stringify(options)` directly, for two reasons.
+--
+-- Order. `pairs()` iteration order is unspecified by the Lua spec. It is
+-- stable for a given build, so this looks fine until the day Quarto ships a
+-- pandoc whose Lua hashes keys differently — at which point every cached file
+-- in every project is orphaned at once. For the in-tree cache pattern the
+-- README recommends, that means a build host without TeX starts failing during
+-- an unrelated dependency upgrade, with no local repro. (#21)
+--
+-- Ambiguity. `stringify` on a table emits its *values*, concatenated with no
+-- delimiter and no keys at all. So `{a = 'x', b = ''}` and `{a = '', b = 'x'}`
+-- hash alike, as do `{a = 'p', b = 'q'}` and `{a = 'pq', b = ''}` — different
+-- options, one cache entry, and whichever block is rendered first wins. That
+-- one is a wrong image rather than a missing one.
+--
+-- Sorting fixes the first; length-prefixing each key and value fixes the
+-- second, including for values that themselves contain the delimiters. The
+-- code is length-prefixed too, so a block whose text happens to end in what
+-- another block's options encode to cannot collide with it.
+local function canonical_options(options)
+  local keys = {}
+  for k in pairs(options) do keys[#keys + 1] = k end
+  table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+  local parts = {}
+  for _, k in ipairs(keys) do
+    local ks, vs = tostring(k), stringify(options[k])
+    parts[#parts + 1] = #ks .. ':' .. ks .. '=' .. #vs .. ':' .. vs
+  end
+  return table.concat(parts, ',')
+end
+
 local function cache_filename(basename, hash, options, format)
-  local cache_key = pandoc.sha1(hash .. stringify(options))
+  local cache_key = pandoc.sha1(
+    #hash .. ':' .. hash .. canonical_options(options)
+  )
   local short = cache_key:sub(1, 8)
   local label = basename or 'tikz'
   if #label == 40 and label:match('^[0-9a-f]+$') then
@@ -320,6 +355,34 @@ local function split_lines(s)
   end
   if lines[#lines] == '' then table.remove(lines) end
   return lines
+end
+
+-- The block text as it matters to the *compiler*, with the `%%|` directives
+-- removed. Used for the cache key and for the generated basename, never for
+-- what is actually compiled.
+--
+-- `%%|` lines are TeX comments, so dropping them cannot change a rendered
+-- byte, and every directive that does influence compilation — additionalPackages,
+-- header-includes, renderer, opt-* — is folded into the options half of the key
+-- separately by `diagram_options`. What is left in them is presentation:
+-- caption, alt, label, name, fig-attr, filename. Hashing those meant that
+-- captioning a diagram, or migrating a block from the deprecated
+-- `{.tikz filename='x'}` fence attribute to the canonical `%%| filename: x`,
+-- silently re-keyed a cache entry whose image had not changed — invisible
+-- locally, fatal on a TeX-less build host rendering from a committed cache. (#28)
+--
+-- A directive sharing a line with code truncates that line rather than removing
+-- it; a line left blank by the removal is dropped, so an indented directive and
+-- an absent one agree.
+local function hashable_code(code)
+  local out = {}
+  for _, line in ipairs(split_lines(code)) do
+    local kept = line:gsub('%%%%|.*$', '')
+    if kept == line or not kept:match('^%s*$') then
+      out[#out + 1] = kept
+    end
+  end
+  return table.concat(out, '\n')
 end
 
 -- The library loaders we know how to hoist. All are idempotent — PGF records
@@ -885,10 +948,10 @@ local function code_to_figure(conf)
     end
 
     -- Get basename for file naming
-    local basename = dgr_opt.filename or pandoc.sha1(block.text)
+    local basename = dgr_opt.filename or pandoc.sha1(hashable_code(block.text))
 
     -- Check if image is cached
-    local hash = block.text
+    local hash = hashable_code(block.text)
     local imgdata, imgtype = nil, nil
     local out_format = conf.output_format
     if conf.cache then
@@ -1134,10 +1197,12 @@ local function configure (meta)
   }
 end
 
--- Pure helpers, exercised by tests/test_passthrough.lua. Exported as a global
+-- Pure helpers, exercised by the suites under tests/. Exported as a global
 -- rather than as a key on the returned table: Quarto only accepts integer keys
 -- there and silently drops the whole filter if it finds anything else.
-TIKZ_PASSTHROUGH_TEST = {
+TIKZ_TEST = {
+  canonical_options = canonical_options,
+  hashable_code = hashable_code,
   code_part = code_part,
   match_loader_line = match_loader_line,
   split_libs = split_libs,
