@@ -105,7 +105,6 @@ end
 
 local image_cache = nil  -- Path holding the image cache, or `nil` if the cache is not used.
 local tikzjax_assets_injected = false  -- Guards once-per-document injection of TikZJax JS/CSS.
-local passthrough_header_seen = {}  -- Text already hoisted into the preamble by the latex-passthrough renderer.
 
 -- Function to parse properties from code comments
 local function properties_from_code (code, comment_start)
@@ -1012,6 +1011,82 @@ $body$
   end
 end
 
+-- Resolve the three orthogonal per-block axes, and derive the cache key.
+--
+-- The axes are independent by construction:
+--
+--   * `renderer`           — *how* a block is drawn when we have to draw it:
+--                            'latex' (the TeX + svg-engine chain) or
+--                            'tikzjax' (a <script type="text/tikz"> the
+--                            reader's browser renders).
+--   * `latex-passthrough`  — *whether* to draw it at all. Under LaTeX output
+--                            the host document can typeset the picture
+--                            itself, so we hand over the source. Deliberately
+--                            not a renderer value: it applies to exactly one
+--                            output family, and on every other format
+--                            `renderer` already says what should happen.
+--   * `embed`              — how a rendered SVG reaches an HTML page. Changes
+--                            the delivery, never the bytes.
+--
+-- `key_opts` is a *separate table*, not `user_opt` with keys deleted from it.
+-- That distinction is the whole point of this function. The old code mutated
+-- one table that served as both compiler options and cache-key material, so
+-- every axis had to remember to erase its own raw directive text before the
+-- key was taken. `embed` and `latex-passthrough` remembered; `renderer` did
+-- not, and a no-op `%%| renderer: latex` therefore produced a second cache
+-- entry for a byte-identical image — as did any value that had already been
+-- warned about and discarded. That is the #28 failure again: a presentation
+-- level edit orphaning a committed cache entry, invisible on a machine with
+-- TeX and fatal on a build host without one.
+--
+-- Building the key from the *resolved* values instead makes that class of bug
+-- unreachable: a raw directive can only reach the key by being copied there.
+local function resolve_axes(user_opt, conf)
+  local renderer = normalize_renderer(user_opt['renderer'], '%%| renderer:')
+    or conf.renderer or 'latex'
+
+  local passthrough = user_opt['latex-passthrough']
+  if passthrough ~= nil then
+    local parsed = truthy(passthrough)
+    if parsed == nil then
+      log.warning(
+        "tikz: %%| latex-passthrough: expects true or false, got '" ..
+        stringify(passthrough) .. "'. Ignoring it."
+      )
+    end
+    passthrough = parsed
+  end
+  if passthrough == nil then passthrough = conf.latex_passthrough end
+
+  local embed = normalize_embed(user_opt['embed'], '%%| embed:')
+    or conf.embed or 'img'
+
+  -- Everything that influences the rendered bytes, and nothing else.
+  local key_opts = {}
+  for k, v in pairs(user_opt) do key_opts[k] = v end
+  -- The three axes are re-added below as resolved values, or not at all.
+  key_opts['renderer'] = nil
+  key_opts['embed'] = nil
+  key_opts['latex-passthrough'] = nil
+  -- `renderer` only when non-default, so cache entries written before it
+  -- existed as a key stay valid. `embed` and `latex-passthrough` never: the
+  -- first changes only the delivery of bytes already rendered, and under the
+  -- second nothing is cached at all.
+  if renderer ~= 'latex' then key_opts['renderer'] = renderer end
+  -- Doc-level settings that do change the bytes, so that editing the template
+  -- or switching engines invalidates what they produced.
+  if conf.tex_template_content then
+    key_opts['tex-template-hash'] = pandoc.sha1(conf.tex_template_content)
+  end
+  key_opts['tex-engine'] = conf.tex_engine
+  key_opts['svg-engine'] = conf.svg_engine
+  if conf.svg_command then
+    key_opts['svg-command'] = table.concat(conf.svg_command, ' ')
+  end
+
+  return renderer, passthrough, embed, key_opts
+end
+
 -- Function to process code blocks and generate figures
 local function code_to_figure(conf)
   return function(block)
@@ -1026,64 +1101,12 @@ local function code_to_figure(conf)
 
     -- Get options from code block
     local dgr_opt = diagram_options(block)
-
-    -- Fold doc-level options that influence compilation into the cache key,
-    -- so editing the template / switching the tex or svg engine / changing
-    -- the output format invalidates cached entries.
-    if conf.tex_template_content then
-      dgr_opt.opt['tex-template-hash'] = pandoc.sha1(conf.tex_template_content)
-    end
-    dgr_opt.opt['tex-engine'] = conf.tex_engine
-    dgr_opt.opt['svg-engine'] = conf.svg_engine
-    if conf.svg_command then
-      dgr_opt.opt['svg-command'] = table.concat(conf.svg_command, ' ')
-    end
-
-    -- Resolve the two independent axes.
-    --
-    -- `renderer` says *how* a block is drawn when we have to draw it: 'latex'
-    -- (the pdflatex/inkscape chain configured above) or 'tikzjax' (a
-    -- <script type="text/tikz"> rendered in the reader's browser). Both are
-    -- per-block overridable with %%| renderer: ….
-    local renderer = normalize_renderer(dgr_opt.opt['renderer'], '%%| renderer:')
-      or conf.renderer or 'latex'
-
-    -- `latex-passthrough` says *whether* to draw it at all: under LaTeX output
-    -- the host document can typeset the picture itself, so we hand over the
-    -- source instead of rendering anything. It is deliberately not a renderer
-    -- value — it applies to exactly one output family, and on every other
-    -- format `renderer` above already says what should happen, with no
-    -- fallback policy for this filter to invent.
-    local passthrough = dgr_opt.opt['latex-passthrough']
-    if passthrough ~= nil then
-      local parsed = truthy(passthrough)
-      if parsed == nil then
-        log.warning(
-          "tikz: %%| latex-passthrough: expects true or false, got '" ..
-          stringify(passthrough) .. "'. Ignoring it."
-        )
-      end
-      passthrough = parsed
-    end
-    if passthrough == nil then passthrough = conf.latex_passthrough end
-
-    -- `embed` decides how a rendered SVG reaches an HTML page. Like
-    -- `latex-passthrough` it is orthogonal to `renderer`: it changes the
-    -- delivery, never the bytes, which is why it stays out of the cache key
-    -- below and why existing cache entries remain valid when it is switched on.
-    local embed = normalize_embed(dgr_opt.opt['embed'], '%%| embed:')
-      or conf.embed or 'img'
-    dgr_opt.opt['embed'] = nil
-    -- Keep it out of the cache key: when passthrough is in force nothing is
-    -- cached, and when it isn't the flag has no bearing on the rendered image.
-    dgr_opt.opt['latex-passthrough'] = nil
-
-    -- Fold the renderer into the cache key only when non-default, so existing
-    -- latex-pipeline cache entries (written without a 'renderer' key) stay
-    -- valid.
-    if renderer ~= 'latex' then
-      dgr_opt.opt['renderer'] = renderer
-    end
+    local renderer, passthrough, embed, key_opts = resolve_axes(dgr_opt.opt, conf)
+    -- The other half of the split: what the renderers read. Only
+    -- `additional-packages` and `header-includes` are consulted, so the
+    -- resolved axes are deliberately absent — they steer the dispatch below,
+    -- not the LaTeX that comes out of it.
+    local compile_opts = dgr_opt.opt
 
     -- LaTeX passthrough: emit the TikZ source itself, letting the host
     -- document typeset it. Gated on the output really being LaTeX, so the
@@ -1095,7 +1118,7 @@ local function code_to_figure(conf)
     -- to a LaTeX build, not fall into tikzjax's drop-for-non-HTML rule.
     if passthrough and conf.output_format == 'pdf' then
       local raw = embed_latex_passthrough(
-        block.text, dgr_opt.opt,
+        block.text, compile_opts,
         dgr_opt.filename or blank_to_nil(dgr_opt['fig-attr'].id) or '<unnamed>'
       )
       -- A captioned block still becomes a pandoc.Figure, exactly as on the
@@ -1125,7 +1148,7 @@ local function code_to_figure(conf)
         )
         return {}  -- remove the block from the output entirely
       end
-      local raw = embed_tikzjax(block.text, dgr_opt.opt, conf)
+      local raw = embed_tikzjax(block.text, compile_opts, conf)
       -- Figure content takes a list of Blocks; RawBlock plugs in directly
       -- (unlike the LaTeX path's Image, which is an Inline that needs Plain).
       return dgr_opt.caption and
@@ -1137,15 +1160,16 @@ local function code_to_figure(conf)
           raw
     end
 
-    -- Get basename for file naming
-    local basename = dgr_opt.filename or pandoc.sha1(hashable_code(block.text))
+    -- The block text as it matters to the compiler: the basis for both the
+    -- generated basename and the cache key, so the two cannot drift apart.
+    local hash = hashable_code(block.text)
+    local basename = dgr_opt.filename or pandoc.sha1(hash)
 
     -- Check if image is cached
-    local hash = hashable_code(block.text)
     local imgdata, imgtype = nil, nil
     local out_format = conf.output_format
     if conf.cache then
-      imgdata, imgtype = get_cached_image(basename, hash, dgr_opt.opt, out_format)
+      imgdata, imgtype = get_cached_image(basename, hash, key_opts, out_format)
     end
 
     if not imgdata or not imgtype then
@@ -1164,7 +1188,7 @@ local function code_to_figure(conf)
       -- through. On a build host without TeX that turns a failed publish
       -- into a cosmetic gap. (#30)
       local ok, result, extra = pcall(function()
-        return compile_tikz_to_svg(block.text, dgr_opt.opt, conf, basename) -- Pass conf and basename
+        return compile_tikz_to_svg(block.text, compile_opts, conf, basename)
       end)
       local failure
       if not ok then
@@ -1184,7 +1208,7 @@ local function code_to_figure(conf)
       imgdata, imgtype = result, extra or mime_for_format(out_format)
 
       -- Cache the image
-      cache_image(basename, hash, dgr_opt.opt, imgdata, out_format)
+      cache_image(basename, hash, key_opts, imgdata, out_format)
     end
 
     -- Inline embedding: hand the SVG to the page as markup instead of
@@ -1451,6 +1475,7 @@ TIKZ_TEST = {
   hashable_code = hashable_code,
   code_part = code_part,
   match_loader_line = match_loader_line,
+  resolve_axes = resolve_axes,
   normalize_renderer = normalize_renderer,
   normalize_embed = normalize_embed,
   split_libs = split_libs,

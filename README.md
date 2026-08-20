@@ -391,7 +391,13 @@ The code half of the hash has the `%%|` directive lines removed first.
 They are TeX comments, so they cannot change a rendered byte, and the
 ones that *do* influence compilation — `additionalPackages`,
 `header-includes`, `renderer`, `opt-*` — are folded into the options
-half separately. What is left in them is presentation: `caption`,
+half separately, as the values they *resolve to* rather than as the text
+you wrote. So an option that resolves to its default is invisible to the
+key: a no-op `%%| renderer: latex`, or a value the filter rejected and
+warned about, hashes the same as no directive at all. `embed` and
+`latex-passthrough` never reach the key — the first changes only how
+already-rendered bytes are delivered to the page, and under the second
+nothing is cached. What is left in them is presentation: `caption`,
 `alt`, `label`, `name`, `fig-attr`, `filename`. Adding a caption, or
 migrating a block from the deprecated `{.tikz filename='x'}` fence
 attribute to the canonical `%%| filename: x`, therefore leaves the
