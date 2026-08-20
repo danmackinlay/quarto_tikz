@@ -602,9 +602,9 @@ end
 --
 -- Two passes, because how a load is written decides what we may do with it:
 --
---   1. A line that is *exactly* one loader call is **moved** — hoisted and
---      removed from the body. This is the overwhelmingly common shape and it
---      keeps the shipped `.tex` tidy.
+--   1. A line that is *exactly* one loader call, outside any `tikzpicture`,
+--      is **moved** — hoisted and removed from the body. This is the
+--      overwhelmingly common shape and it keeps the shipped `.tex` tidy.
 --   2. A loader call sharing its line with other code cannot be excised
 --      without risking the drawing, so it is **copied**: the preamble gets a
 --      load, the body keeps its own. That is safe because PGF's loaders are
@@ -622,17 +622,35 @@ end
 -- literal content in a diagram *about* TikZ, and inventing a library name is a
 -- hard error), one whose argument won't brace-balance, and `\usepackage` /
 -- `\usegdlibrary`. Those only produce a warning.
+--
+-- Pass 1 tracks `tikzpicture` depth for exactly that reason. It used to run
+-- before any depth was known, so an own-line loader *inside* a picture was
+-- silently moved — the one case the paragraph above promises to leave alone,
+-- and the one where moving it is most likely to be wrong:
+--
+--     \node {
+--     \usetikzlibrary{arrows}
+--     };
+--
+-- is literal content on its own line. Deleting it changes the drawing and
+-- adds a preamble line nobody asked for. Pass 2 already refused the same
+-- construct when it shared a line with other code; the two passes now agree.
 local function prepare_passthrough_body(code)
   local preamble, body, warns = {}, {}, {}
 
+  local outer_depth = 0
   for _, line in ipairs(split_lines(code)) do
     local macro, arg = match_loader_line(line)
-    if macro then
+    if macro and outer_depth == 0 then
       for _, name in ipairs(split_libs(arg)) do
         preamble[#preamble + 1] = '\\' .. macro .. '{' .. name .. '}'
       end
     elseif not line:match('^%s*%%%%|') then
+      -- Kept, including a loader inside a picture: pass 2 sees it and warns.
       body[#body + 1] = line
+    end
+    for _, m in ipairs(picture_markers(code_part(line))) do
+      outer_depth = outer_depth + m.delta
     end
   end
 
@@ -655,8 +673,8 @@ local function prepare_passthrough_body(code)
     for _, call in ipairs(scan_loader_calls(c, LOADER_MACROS)) do
       if depth_at(call.pos) > 0 then
         warns[#warns + 1] = '\\' .. call.macro ..
-          " inside a tikzpicture is left alone; move it to its own line if it " ..
-          "is meant to load a library: " .. line
+          " inside a tikzpicture is left alone; move it above " ..
+          "\\begin{tikzpicture} if it is meant to load a library: " .. line
       elseif not call.arg then
         warns[#warns + 1] = '\\' .. call.macro ..
           " has no brace-balanced argument, so it cannot be hoisted: " .. line
