@@ -152,5 +152,26 @@ check('doc-level renderer applies when the block is silent',
 check('a rejected block renderer falls back to the doc level, not to latex',
   (R({renderer = 'bogus'}, {renderer = 'tikzjax'})), 'tikzjax')
 
+-- Document-level option reading. Metadata never arrives as a plain Lua
+-- string, so each of these used to repeat `x and stringify(x) or default`.
+local MS, ME = TIKZ_TEST.meta_string, TIKZ_TEST.meta_enum
+check('an absent option takes the default', MS({}, 'tex-engine', 'pdflatex'),
+  'pdflatex')
+check('a present option wins', MS({['tex-engine'] = 'lualatex'}, 'tex-engine',
+  'pdflatex'), 'lualatex')
+check('an explicitly empty option is not absent',
+  MS({['tex-engine'] = ''}, 'tex-engine', 'pdflatex'), '')
+check('a nil default is returned as nil', MS({}, 'tex-template', nil), nil)
+
+local ENGINES = {inkscape = true, dvisvgm = true, pdftocairo = true}
+check('an absent enum takes the default',
+  ME({}, 'svg-engine', ENGINES, 'inkscape', 'inkscape, dvisvgm'), 'inkscape')
+check('a known enum value is kept',
+  ME({['svg-engine'] = 'dvisvgm'}, 'svg-engine', ENGINES, 'inkscape',
+     'inkscape, dvisvgm'), 'dvisvgm')
+check('an unknown enum value warns and takes the default',
+  ME({['svg-engine'] = 'nonsense'}, 'svg-engine', ENGINES, 'inkscape',
+     'inkscape, dvisvgm'), 'inkscape')
+
 print(('%d checks, %d failures'):format(checks, failures))
 os.exit(failures == 0 and 0 or 1)

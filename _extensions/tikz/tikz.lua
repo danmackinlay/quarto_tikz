@@ -207,6 +207,10 @@ end
 -- (the default) or as inline markup.
 local KNOWN_EMBEDS = { img = true, inline = true }
 
+-- PDF/DVI → SVG converters we know how to drive. `tikz.svg-command` is the
+-- escape hatch for anything else; see `convert_command`.
+local KNOWN_SVG_ENGINES = { inkscape = true, dvisvgm = true, pdftocairo = true }
+
 -- Validate an option against its known values. Returns the value when it is
 -- recognized and nil otherwise, so an unusable setting falls through to the
 -- caller's next source: block directive → document metadata → built-in
@@ -223,10 +227,17 @@ local function normalize_enum(value, known, where, supported)
   if value == nil then return nil end
   local name = stringify(value)
   if known[name] then return name end
+  -- What happens next depends on where the value came from: a `%%|`
+  -- directive falls through to the document-level setting, a document-level
+  -- setting to the built-in default. Naming a specific value here is what
+  -- made the old message wrong — it said "falling back to 'latex'" even when
+  -- the document had asked for tikzjax.
+  local consequence = where:match('^tikz%.')
+    and "the built-in default is used"
+    or "the document-level setting applies (or the default, if there is none)"
   log.warning(
-    "tikz: unknown " .. where .. " '" .. name .. "' — ignoring it, so the " ..
-    "document-level setting applies (or the default, if there is none). " ..
-    "Supported values: " .. supported .. "."
+    "tikz: unknown " .. where .. " '" .. name .. "' — ignoring it, so " ..
+    consequence .. ". Supported values: " .. supported .. "."
   )
   return nil
 end
@@ -1387,6 +1398,26 @@ local function build_texinputs()
   return table.concat(parts, sep) .. sep
 end
 
+-- Reading one document-level option. Metadata values arrive as Inlines or as
+-- MetaBool, never as plain Lua strings, so every one of these needed the
+-- same `x and stringify(x) or default` dance — repeated five times, with the
+-- subtlety that an *explicitly empty* value and an absent one are different
+-- things to some callers.
+local function meta_string(conf, name, default)
+  local value = conf[name]
+  if value == nil then return default end
+  return stringify(value)
+end
+
+-- …and one that must be drawn from a fixed set. `normalize_enum` already
+-- does this for the per-block axes; this is the document-level half, which
+-- differs only in wanting the default substituted rather than nil returned.
+local function meta_enum(conf, name, known, default, supported)
+  local value = meta_string(conf, name, nil)
+  if value == nil then return default end
+  return normalize_enum(value, known, 'tikz.' .. name, supported) or default
+end
+
 -- Function to configure the filter based on document metadata. Reads
 -- top-level `tikz:` config and produces a normalized `conf` table that the
 -- per-block code path consumes.
@@ -1414,13 +1445,7 @@ local function configure (meta)
       log.warning("Both 'cache' and 'save-tex' are enabled. Disabling 'save-tex' since caching is active.")
       save_tex = false
     else
-      tex_dir = conf['tex-dir']
-      if tex_dir then
-        tex_dir = pandoc.utils.stringify(tex_dir)
-      else
-        -- Use a default directory, e.g., 'tikz-tex'
-        tex_dir = 'tikz-tex'
-      end
+      tex_dir = meta_string(conf, 'tex-dir', 'tikz-tex')
       pandoc.system.make_directory(tex_dir, true)
     end
   end
@@ -1429,9 +1454,9 @@ local function configure (meta)
   -- pay file I/O per diagram, and so the path resolves against the qmd's
   -- cwd before with_working_directory changes it.
   local tex_template_content = nil
-  local tex_template = conf['tex-template']
+  local tex_template = meta_string(conf, 'tex-template', nil)
   if tex_template then
-    local tex_template_path = absolutize(pandoc.utils.stringify(tex_template))
+    local tex_template_path = absolutize(tex_template)
     tex_template_content = read_file(tex_template_path)
     if not tex_template_content then
       log.error(
@@ -1444,8 +1469,7 @@ local function configure (meta)
   -- TeX engine. Defaults to pdflatex (the historical behaviour). Users who
   -- need lualatex/xelatex (e.g. for fontspec, complex Unicode scripts) can
   -- opt in. Anything matching an executable on PATH is accepted.
-  local tex_engine = conf['tex-engine']
-  tex_engine = tex_engine and pandoc.utils.stringify(tex_engine) or 'pdflatex'
+  local tex_engine = meta_string(conf, 'tex-engine', 'pdflatex')
 
   -- SVG engine. Choices:
   --   inkscape   — default. Consumes the PDF produced by pdflatex.
@@ -1454,16 +1478,8 @@ local function configure (meta)
   --   dvisvgm    — consumes a DVI (we ask pdflatex for -output-format=dvi
   --                in that case). Embeds fonts as WOFF so text in the
   --                rendered SVG stays selectable.
-  local svg_engine = conf['svg-engine']
-  svg_engine = svg_engine and pandoc.utils.stringify(svg_engine) or 'inkscape'
-  local supported = { inkscape = true, dvisvgm = true, pdftocairo = true }
-  if not supported[svg_engine] then
-    log.warning(
-      "tikz: unknown svg-engine '" .. svg_engine ..
-      "' — falling back to inkscape. Supported values: inkscape, dvisvgm, pdftocairo."
-    )
-    svg_engine = 'inkscape'
-  end
+  local svg_engine = meta_enum(conf, 'svg-engine', KNOWN_SVG_ENGINES,
+    'inkscape', 'inkscape, dvisvgm, pdftocairo')
 
   -- Custom svg-command escape hatch. Lets users wire any external converter
   -- (pdf2svg, pymupdf script, mutool, …) without us having to bless each by
@@ -1479,10 +1495,10 @@ local function configure (meta)
     local parts = {}
     if pandoc.utils.type(svg_command_raw) == 'List' then
       for _, item in ipairs(svg_command_raw) do
-        parts[#parts + 1] = pandoc.utils.stringify(item)
+        parts[#parts + 1] = stringify(item)
       end
     else
-      local s = pandoc.utils.stringify(svg_command_raw)
+      local s = stringify(svg_command_raw)
       for word in s:gmatch('%S+') do
         parts[#parts + 1] = word
       end
@@ -1550,9 +1566,7 @@ local function configure (meta)
 
   -- Base URL serving tikzjax.js and fonts.css. Defaults to the canonical
   -- tikzjax.com CDN; users can self-host or pin a fork (e.g. drgrice1's).
-  local tikzjax_url = conf['tikzjax-url']
-    and stringify(conf['tikzjax-url'])
-    or 'https://tikzjax.com/v1'
+  local tikzjax_url = meta_string(conf, 'tikzjax-url', 'https://tikzjax.com/v1')
   -- Strip a trailing slash so concatenation with /fonts.css and /tikzjax.js
   -- produces a single separator regardless of how the user wrote the URL.
   tikzjax_url = tikzjax_url:gsub('/+$', '')
@@ -1591,6 +1605,8 @@ TIKZ_TEST = {
   hashable_code = hashable_code,
   code_part = code_part,
   match_loader_line = match_loader_line,
+  meta_string = meta_string,
+  meta_enum = meta_enum,
   convert_command = convert_command,
   build_tex_document = build_tex_document,
   as_figure = as_figure,
