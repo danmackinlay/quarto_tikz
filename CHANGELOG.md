@@ -37,6 +37,21 @@ options.
   therefore collapsed onto one file, and the block rendered first displayed
   the other one's diagram. All three now share one name, derived from the
   code and the options together.
+- **`embed: inline` mis-namespaced some stylesheets.** A grouped CSS selector
+  (`.f0, .f1 {`) was skipped while the `class=` attributes it applied to were
+  still renamed, silently detaching the style; an element carrying more than
+  one class (`class="f0 bold"`) was not namespaced at all, so two diagrams on
+  a page could still collide through it. A `<svg …/>` with no content put its
+  `<title>` outside the element, and an attribute value containing `>` had the
+  `<title>` spliced into the middle of it.
+- **`svg-command` accepted a command it could not run.** Only emptiness was
+  checked, so a single-word `svg-command: pdf2svg` was accepted and then run
+  with no PDF to read and nowhere to write. It must now name both `{input}`
+  and `{output}`.
+- **A relative `tex-template:` path could fail to resolve.** Paths were made
+  absolute against `$PWD`, which is a shell convention rather than something
+  every launcher exports; the fallback when it was missing produced exactly
+  the relative path that resolution exists to prevent.
 - **A directive on the block's last line was silently ignored.** Pandoc strips
   the trailing newline from a code block, and the option reader's pattern ran to
   a newline, so a `%%| caption:` or `%%| renderer:` written as the block's final
@@ -98,9 +113,15 @@ options.
   > you commit an in-tree `cache-dir`, do that first render on a machine with
   > TeX.
 
+- Inlined SVGs are namespaced in one pass per rewrite rather than one per
+  name, which also removed the pattern-escaping the old approach needed:
+  22.0 ms to 3.7 ms on a 69 KB `pdftocairo` SVG.
 - The test suites share one assertion helper (`tests/harness.lua`) instead of
-  each carrying its own copy, and a new suite covers the directive parser and
-  the option router.
+  each carrying its own copy, and two new suites cover the directive parser,
+  the option router and the document-level configuration. 154 checks to 276.
+- Source comments no longer retell incidents the CHANGELOG already records;
+  what remains is the reasoning a maintainer would otherwise have to
+  rediscover.
 - `example.qmd` no longer sets `save-tex` and `tex-dir`, so rendering it leaves
   no `tikz-tex/` directory behind for anyone who copies its front-matter.
 
