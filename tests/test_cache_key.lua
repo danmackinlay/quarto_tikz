@@ -236,9 +236,11 @@ check('a missing basename becomes the same label',
 check('the hash is eight characters',
   #(AN('d', CODE, {}):match('%.(.+)$')), 8)
 
-check('artifact_file appends the extension',
-  AF('d', CODE, {}, 'svg'), AN('d', CODE, {}) .. '.svg')
+-- artifact_file takes the already-computed name, so the hash is taken once
+-- per diagram rather than once per artifact it produces.
+local NAME = AN('d', CODE, {})
+check('artifact_file appends the extension', AF(NAME, 'svg'), NAME .. '.svg')
 check('the formats differ only by extension',
-  AF('d', CODE, {}, 'pdf'):gsub('pdf$', 'svg'), AF('d', CODE, {}, 'svg'))
+  (AF(NAME, 'pdf'):gsub('pdf$', 'svg')), AF(NAME, 'svg'))
 
 t.done()

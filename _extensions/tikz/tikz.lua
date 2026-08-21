@@ -6,13 +6,11 @@ Based on the style of 'quarto_diagram/diagram.lua', adapted for TikZ diagrams.
 
 PANDOC_VERSION:must_be_at_least '3.0'
 
-local pandoc = require 'pandoc'
-local system = require 'pandoc.system'
-local utils  = require 'pandoc.utils'
-
-local stringify = utils.stringify
-local with_temporary_directory = system.with_temporary_directory
-local with_working_directory = system.with_working_directory
+-- `pandoc` is a global in a filter; these are the members used often enough
+-- to be worth a short name.
+local stringify = pandoc.utils.stringify
+local with_temporary_directory = pandoc.system.with_temporary_directory
+local with_working_directory = pandoc.system.with_working_directory
 
 -- Functions to read and write files
 local function read_file (filepath)
@@ -132,7 +130,7 @@ end
 local function cachedir ()
   local cache_home = os.getenv 'XDG_CACHE_HOME'
   if not cache_home or cache_home == '' then
-    local user_home = system.os == 'windows'
+    local user_home = pandoc.system.os == 'windows'
       and os.getenv 'USERPROFILE'
       or os.getenv 'HOME'
 
@@ -571,24 +569,20 @@ local function artifact_name(basename, hash, options)
   return label .. '.' .. key:sub(1, 8)
 end
 
-local function artifact_file(basename, hash, options, format)
-  return artifact_name(basename, hash, options) .. '.' .. format
+-- Everything below takes the already-computed `name`, so a diagram's hash is
+-- taken once per render rather than again for every artifact it produces.
+local function artifact_file(name, format)
+  return name .. '.' .. format
 end
 
 -- Where a given diagram's cached file lives, or nil when caching is off.
---
--- `dir` is passed in rather than read from an upvalue: the cache directory
--- used to live in a module-level `image_cache` *and* be copied into `conf`,
--- so there were two places to look and only one of them was ever read.
-local function cache_path(dir, basename, hash, options, format)
+local function cache_path(dir, name, format)
   if not dir then return nil end
-  return pandoc.path.join {
-    dir, artifact_file(basename, hash, options, format),
-  }
+  return pandoc.path.join { dir, artifact_file(name, format) }
 end
 
-local function get_cached_image(dir, basename, hash, options, format)
-  local path = cache_path(dir, basename, hash, options, format)
+local function get_cached_image(dir, name, format)
+  local path = cache_path(dir, name, format)
   local imgdata = path and read_file(path)
   if imgdata then
     return imgdata, mime_for_format(format)
@@ -596,8 +590,8 @@ local function get_cached_image(dir, basename, hash, options, format)
   return nil
 end
 
-local function cache_image(dir, basename, hash, options, imgdata, format)
-  local path = cache_path(dir, basename, hash, options, format)
+local function cache_image(dir, name, format, imgdata)
+  local path = cache_path(dir, name, format)
   if path then write_file(path, imgdata) end
 end
 
@@ -665,21 +659,6 @@ local function code_part(line)
   end
 end
 
--- Match a line that is *exactly* one library-loading call and nothing else,
--- returning the macro name and its argument. The argument is matched with
--- `%b{}` rather than a non-greedy `(.-)}`: the latter backtracks to the last
--- brace on the line, so `\usetikzlibrary{arrows}\begin{tikzpicture}` would
--- match with `arrows}\begin{tikzpicture` as its "argument".
-local function match_loader_line(line)
-  local c = code_part(line)
-  for _, macro in ipairs(LOADER_MACROS) do
-    local arg = c:match('^%s*\\' .. macro .. '%s*(%b{})%s*$')
-      or c:match('^%s*\\' .. macro .. '%s*(%b[])%s*$')
-    if arg then return macro, arg:sub(2, -2) end
-  end
-  return nil
-end
-
 -- Split a loader argument into individual library names, so a dozen blocks
 -- opening with `\usetikzlibrary{arrows, arrows.meta}` collapse to two preamble
 -- lines instead of a dozen identical ones. Splitting is only a deduplication
@@ -695,8 +674,12 @@ local function split_libs(arg)
   return names
 end
 
--- Find every call to one of `macros` in `line` (comments already stripped),
--- in source order, with the position and balanced argument of each.
+-- Find every call to one of `macros` in `line` (comments already stripped), in
+-- source order: the macro name, where the call starts and ends, and its
+-- argument. The argument is matched with `%b{}` rather than a non-greedy
+-- `(.-)}`, which would backtrack to the last brace on the line and read
+-- `\usetikzlibrary{arrows}\begin{tikzpicture}` as one call whose argument is
+-- `arrows}\begin{tikzpicture`.
 local function scan_loader_calls(line, macros)
   local found = {}
   for _, macro in ipairs(macros) do
@@ -708,10 +691,11 @@ local function scan_loader_calls(line, macros)
       -- Reject a longer control sequence (`\usepackages`, say).
       if not line:sub(e + 1, e + 1):match('%a') then
         local p = e + 1
-        while line:sub(p, p) == ' ' do p = p + 1 end
+        while line:sub(p, p):match('^%s$') do p = p + 1 end
         local arg = line:match('^(%b{})', p) or line:match('^(%b[])', p)
         found[#found + 1] = {
           pos = s,
+          stop = arg and (p + #arg - 1) or e,
           macro = macro,
           arg = arg and arg:sub(2, -2) or nil,
         }
@@ -720,6 +704,22 @@ local function scan_loader_calls(line, macros)
   end
   table.sort(found, function(a, b) return a.pos < b.pos end)
   return found
+end
+
+-- Whether `line` is *exactly* one library load and nothing else — the shape
+-- that may be moved rather than copied. Asked of the scanner above so that
+-- both passes share one idea of what a loader call is; a trailing `%` comment
+-- and surrounding whitespace are already gone by the time we look.
+local function match_loader_line(line)
+  local c = code_part(line)
+  local calls = scan_loader_calls(c, LOADER_MACROS)
+  local call = #calls == 1 and calls[1] or nil
+  if not call or not call.arg then return nil end
+  if c:sub(1, call.pos - 1):match('^%s*$')
+    and c:sub(call.stop + 1):match('^%s*$') then
+    return call.macro, call.arg
+  end
+  return nil
 end
 
 -- Positions at which a `tikzpicture` environment opens (+1) or closes (-1).
@@ -738,48 +738,43 @@ local function picture_markers(line)
   return marks
 end
 
--- Prepare a block body for passthrough: hoist the library loads into the host
--- preamble. The `%%|` option directives are already gone: `split_directives`
--- removes them before any renderer sees the code. Returns the preamble lines,
--- the remaining body, and any warnings.
+-- Prepare a block body for passthrough: hoist its library loads into the host
+-- preamble. Returns the preamble lines, the remaining body, and any warnings.
+-- (`%%|` directives are already gone — `split_directives` removes them before
+-- any renderer sees the code.)
 --
--- Two passes, because how a load is written decides what we may do with it:
+-- Two passes, because how a load is written decides what may be done with it:
 --
---   1. A line that is *exactly* one loader call, outside any `tikzpicture`,
---      is **moved** — hoisted and removed from the body. This is the
---      overwhelmingly common shape and it keeps the shipped `.tex` tidy.
---   2. A loader call sharing its line with other code cannot be excised
---      without risking the drawing, so it is **copied**: the preamble gets a
---      load, the body keeps its own. That is safe because PGF's loaders are
---      idempotent — the preamble load wins and the body copy becomes a no-op.
+--   1. A line that is *exactly* one loader call, outside any `tikzpicture`, is
+--      **moved**: hoisted and removed from the body.
+--   2. A loader sharing its line with other code cannot be excised without
+--      risking the drawing, so it is **copied** — the preamble gets a load and
+--      the body keeps its own, which PGF's idempotent loaders make a no-op.
 --
--- Copying matters rather than being merely tidy. `\usetikzlibrary` is legal in
--- the document body, but a captioned block is emitted inside a `figure`
--- environment, and PGF records "library loaded" *globally* while the library
--- file's own definitions are local. Loading inside that group therefore leaves
--- the definitions behind at `\end{figure}` while suppressing every later load
--- of the same library — so a *different, later* block fails, with an error
--- naming PGF math rather than library loading.
+-- Both passes track `tikzpicture` depth, because a loader inside a picture may
+-- be literal content in a diagram *about* TikZ. That, an argument that will
+-- not brace-balance, and `\usepackage` / `\usegdlibrary` are the three shapes
+-- left alone with a warning.
 --
--- What we still refuse to touch: a loader inside a `tikzpicture` (it may be
--- literal content in a diagram *about* TikZ, and inventing a library name is a
--- hard error), one whose argument won't brace-balance, and `\usepackage` /
--- `\usegdlibrary`. Those only produce a warning.
---
--- Pass 1 tracks `tikzpicture` depth for exactly that reason, so that both
--- passes agree about a loader inside a picture. An own-line one is still
--- literal content — `\node {` / `\usetikzlibrary{arrows}` / `};` — and moving
--- it would change the drawing.
+-- Why copying is not merely tidiness: see the README's LaTeX-passthrough
+-- section, which explains what a library load scoped to a `figure` environment
+-- does to a later block.
 local function prepare_passthrough_body(code)
   local preamble, body, warns = {}, {}, {}
+
+  -- One load per library name, so a dozen blocks opening with
+  -- `\usetikzlibrary{arrows, arrows.meta}` collapse to two preamble lines.
+  local function hoist_libs(macro, arg)
+    for _, name in ipairs(split_libs(arg)) do
+      preamble[#preamble + 1] = '\\' .. macro .. '{' .. name .. '}'
+    end
+  end
 
   local outer_depth = 0
   for _, line in ipairs(split_lines(code)) do
     local macro, arg = match_loader_line(line)
     if macro and outer_depth == 0 then
-      for _, name in ipairs(split_libs(arg)) do
-        preamble[#preamble + 1] = '\\' .. macro .. '{' .. name .. '}'
-      end
+      hoist_libs(macro, arg)
     else
       -- Kept, including a loader inside a picture: pass 2 sees it and warns.
       body[#body + 1] = line
@@ -814,9 +809,7 @@ local function prepare_passthrough_body(code)
         warns[#warns + 1] = '\\' .. call.macro ..
           " has no brace-balanced argument, so it cannot be hoisted: " .. line
       else
-        for _, name in ipairs(split_libs(call.arg)) do
-          preamble[#preamble + 1] = '\\' .. call.macro .. '{' .. name .. '}'
-        end
+        hoist_libs(call.macro, call.arg)
       end
     end
     for _, call in ipairs(scan_loader_calls(c, WARN_ONLY_MACROS)) do
@@ -1189,35 +1182,40 @@ end
 --
 -- Three renderers produce a `RawBlock`, which `Figure` takes directly; the
 -- `<img>` path produces an `Image`, which is an Inline and needs a `Plain`
--- around it. Handled here rather than restated at each return.
+-- around it.
 local function as_figure(content, dgr_opt)
   local block = content.t == 'Image' and pandoc.Plain { content } or content
   if not dgr_opt.caption then return block end
   return pandoc.Figure({ block }, dgr_opt.caption, dgr_opt['fig-attr'])
 end
 
--- Compile TikZ code to either SVG (default) or PDF (passthrough, used when
--- the Quarto output format is PDF).
+-- Compile TikZ code to either SVG (default) or PDF (embedded directly under
+-- LaTeX output).
 --
--- Returns `imgdata, mimetype` on success and `nil, message` on failure, and
--- deliberately does not `error()` for an expected failure — a missing TeX
--- engine, a LaTeX run that produced no file.
---
--- `error()` inside a filter does not do what it looks like under Quarto
--- (verified on 1.10.18): the message is logged but execution continues to the
--- next statement, and a surrounding `pcall` reports success. Returning
--- failures keeps this control flow independent of the host's error semantics,
--- whichever way Quarto jumps in future. (#30)
+-- Returns `imgdata, mimetype` on success and `nil, message` on failure.
+-- Expected failures — no TeX engine, a LaTeX run that produced no file — are
+-- returned rather than raised, because `error()` inside a filter does not
+-- abort under Quarto: the message is logged, execution continues to the next
+-- statement, and a surrounding `pcall` reports success.
 local function compile_tikz_to_svg(code, user_opts, conf, name)
-  -- Ensure required dependencies are available
-  if not check_dependency(conf['tex-engine']) then
-    return nil, conf['tex-engine'] .. " not found. Install it, or set " ..
-      "tikz.tex-engine to a TeX engine you do have (pdflatex, lualatex, " ..
-      "xelatex, …)."
+  -- Every failure quotes the block, which is what makes one diagnosable
+  -- among fifty in a render log.
+  local function fail(detail)
+    return nil, detail .. "\nTikZ Code:\n" .. code
   end
-  -- The svg converter is only needed when we actually convert to SVG. For
-  -- PDF output we embed the intermediate PDF directly and nothing here is
-  -- invoked.
+  -- A missing executable is reported before anything runs: on a machine with
+  -- TeX but no converter, fifty diagrams should say so fifty times without
+  -- running LaTeX fifty times first.
+  local function missing(cmd, remedy)
+    return nil, cmd .. " not found. Install it, or set " .. remedy .. "."
+  end
+
+  if not check_dependency(conf['tex-engine']) then
+    return missing(conf['tex-engine'],
+      "tikz.tex-engine to a TeX engine you do have (pdflatex, lualatex, xelatex, …)")
+  end
+  -- The converter is only needed when we actually convert. Under LaTeX output
+  -- the intermediate PDF is the deliverable and nothing here is invoked.
   local files = {
     tex = name .. ".tex",
     pdf = name .. ".pdf",
@@ -1227,17 +1225,21 @@ local function compile_tikz_to_svg(code, user_opts, conf, name)
   }
   local convert_cmd, convert_args = convert_command(conf, files)
   if conf.pipeline.convert and not check_dependency(convert_cmd) then
-    return nil, convert_cmd .. " not found. Install it (it is the configured " ..
-      "SVG converter), or set tikz.svg-engine / tikz.svg-command to one you " ..
-      "do have."
+    return missing(convert_cmd,
+      "tikz.svg-engine / tikz.svg-command to a converter you do have")
   end
 
   local function process_in_dir(dir)
     return with_working_directory(dir, function()
-      write_file(
+      -- A failed write would otherwise surface as a baffling LaTeX error
+      -- about a file that was never there.
+      if not write_file(
         files.tex,
         build_tex_document(code, user_opts, conf.tex_template_content)
-      )
+      ) then
+        return fail("Could not write " .. files.tex .. " for TikZ figure '" ..
+          name .. "'.")
+      end
 
       -- Execute the LaTeX compiler with TEXINPUTS so blocks can \input or
       -- \usepackage shared files from the qmd directory or the extension dir.
@@ -1259,9 +1261,9 @@ local function compile_tikz_to_svg(code, user_opts, conf, name)
         end)
       end)
       if not success then
-        return nil, "Error compiling TikZ figure '" .. name .. "':\n" ..
+        return fail("Error compiling TikZ figure '" .. name .. "':\n" ..
           tostring(latex_result) .. "\nLaTeX Log:\n" ..
-          (read_file(files.log) or "") .. "\nTikZ Code:\n" .. code
+          (read_file(files.log) or ""))
       end
 
       -- Nothing to convert: the intermediate the TeX run produced is what we
@@ -1271,8 +1273,8 @@ local function compile_tikz_to_svg(code, user_opts, conf, name)
         local produced = files[conf.pipeline.intermediate]
         local imgdata = read_file(produced)
         if not imgdata then
-          return nil, "Failed to read " .. produced .. " for TikZ figure '" ..
-            name .. "'.\nTikZ Code:\n" .. code
+          return fail("Failed to read " .. produced .. " for TikZ figure '" ..
+            name .. "'.")
         end
         return imgdata, mime_for_format(conf.pipeline.intermediate)
       end
@@ -1282,16 +1284,14 @@ local function compile_tikz_to_svg(code, user_opts, conf, name)
         pandoc.pipe, convert_cmd, convert_args, ''
       )
       if not success_convert then
-        return nil, "Error converting to SVG (command: " .. convert_cmd ..
-          ") for TikZ figure '" .. name .. "':\n" ..
-          tostring(convert_result) .. "\nTikZ Code:\n" .. code
+        return fail("Error converting to SVG (command: " .. convert_cmd ..
+          ") for TikZ figure '" .. name .. "':\n" .. tostring(convert_result))
       end
 
-      -- Read the SVG file
       local imgdata = read_file(files.svg)
       if not imgdata then
-        return nil, "Failed to read generated SVG file for TikZ figure '" ..
-          name .. "'.\nTikZ Code:\n" .. code
+        return fail("Failed to read generated SVG file for TikZ figure '" ..
+          name .. "'.")
       end
       return imgdata, 'image/svg+xml'
     end)
@@ -1433,8 +1433,7 @@ local function code_to_figure(conf)
     -- Check if image is cached
     local imgdata, imgtype = nil, nil
     local image_format = conf.image_format
-    imgdata, imgtype = get_cached_image(
-      conf.image_cache, basename, hash, key_opts, image_format)
+    imgdata, imgtype = get_cached_image(conf.image_cache, name, image_format)
 
     if not imgdata or not imgtype then
       -- No cached image; compile. Two failure channels: a returned
@@ -1464,18 +1463,14 @@ local function code_to_figure(conf)
       imgdata, imgtype = result, extra or mime_for_format(image_format)
 
       -- Cache the image
-      cache_image(conf.image_cache, basename, hash, key_opts, imgdata, image_format)
+      cache_image(conf.image_cache, name, image_format, imgdata)
     end
 
-    -- Inline embedding: hand the SVG to the page as markup instead of
-    -- referencing a file. A browser renders an `<img>`-referenced SVG in
-    -- secure static mode — the document inside is walled off, so its labels
-    -- are unselectable, invisible to find-in-page and to screen readers, and
-    -- unreachable by the page's CSS. Inlining is what makes `svg-engine:
-    -- dvisvgm` worth choosing: its real `<text>` elements only pay off here.
-    --
-    -- Restricted to HTML output. `image_format` is 'svg' for everything that
-    -- is not LaTeX, docx included, and docx needs a genuine image file. (#27)
+    -- Inline embedding: hand the SVG to the page as markup rather than as a
+    -- file reference, which is what exposes its text to selection, search and
+    -- screen readers. Restricted to HTML output — `image_format` is 'svg' for
+    -- everything that is not LaTeX, docx included, and docx needs a genuine
+    -- image file.
     if embed == 'inline' and image_format == 'svg' and is_html_output() then
       doc_state.inline_svg_seq = doc_state.inline_svg_seq + 1
       local markup = namespace_svg(imgdata, 'tikz' .. doc_state.inline_svg_seq, dgr_opt.alt)
@@ -1488,7 +1483,7 @@ local function code_to_figure(conf)
       )
     end
 
-    local fname = name .. '.' .. image_format
+    local fname = artifact_file(name, image_format)
 
     -- Store the data in the mediabag:
     pandoc.mediabag.insert(fname, imgtype, imgdata)
