@@ -209,4 +209,46 @@ check('the tikzjax url loses its trailing slash',
 check('a block-scoped option is not read at document level',
   conf_for({['header-includes'] = '\\relax'})['header-includes'], nil)
 
+-- resolve_option: the whole precedence chain, block directive -> document
+-- setting -> built-in default. `configure` always populates conf for a
+-- non-block option, so in practice the third leg is reached only by a caller
+-- passing a partial conf — which is exactly why it is pinned here.
+local RO = T.resolve_option
+check('a block directive wins over the document setting',
+  RO('renderer', {renderer = 'tikzjax'}, {renderer = 'latex'}), 'tikzjax')
+check('the document setting applies when the block is silent',
+  RO('renderer', {}, {renderer = 'tikzjax'}), 'tikzjax')
+check('the built-in default applies when both are silent',
+  RO('renderer', {}, {}), 'latex')
+check('a rejected block value falls through to the document setting',
+  RO('renderer', {renderer = 'bogus'}, {renderer = 'tikzjax'}), 'tikzjax')
+check('a rejected block value falls through to the default',
+  RO('renderer', {renderer = 'bogus'}, {}), 'latex')
+check('a boolean option resolves the same way',
+  RO('latex-passthrough', {['latex-passthrough'] = 'yes'}, {}), true)
+check('an explicit false is not mistaken for unset',
+  RO('latex-passthrough', {['latex-passthrough'] = 'no'},
+     {['latex-passthrough'] = true}), false)
+
+-- build_tex_document: the synthesized standalone document, and the custom
+-- template path. Pure — it neither reads nor writes a file.
+local BTD = T.build_tex_document
+local doc = BTD(PIC, {['additional-packages'] = '\\usepackage{adjustbox}',
+                      ['header-includes'] = '\\tikzset{a/.style={}}'}, nil)
+check('the default template loads standalone',
+  t.has(doc, '\\documentclass[tikz]{standalone}'), true)
+check('additional-packages reaches the preamble',
+  t.has(doc, '\\usepackage{adjustbox}'), true)
+check('header-includes reaches the preamble',
+  t.has(doc, '\\tikzset{a/.style={}}'), true)
+check('the body is the block code', t.has(doc, PIC), true)
+check('the preamble precedes the body',
+  doc:find('adjustbox', 1, true) < doc:find('begin{tikzpicture}', 1, true), true)
+check('an empty option set still produces a document',
+  t.has(BTD(PIC, {}, nil), '\\begin{document}'), true)
+check('a custom template replaces the built-in one',
+  t.has(BTD(PIC, {}, '\\documentclass{minimal}\n$body$\n'), 'minimal'), true)
+check('…and the built-in class is then gone',
+  t.has(BTD(PIC, {}, '\\documentclass{minimal}\n$body$\n'), 'standalone'), false)
+
 t.done()
