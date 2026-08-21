@@ -92,6 +92,46 @@ check('every token in a class list is namespaced',
   has(multi, "class='f0-n bold-n'"), true)
 check('…and the selector still agrees', has(multi, '.f0-n {'), true)
 
+-- Rewriting is scoped to where a name can legally appear, so a name renamed
+-- in one place is renamed in every other and nowhere else.
+
+-- A `font-family` reference is terminated by the closing quote when it is the
+-- last declaration in a `style="…"`. Renaming the @font-face while missing
+-- that reference leaves the text asking for a family that no longer exists.
+local ff = N([[<svg><style>@font-face{font-family:cmmi10;src:url(x)}</style>]] ..
+             [[<text style="font-family:cmmi10">x</text></svg>]], 'n')
+check('@font-face renamed', has(ff, 'font-family:cmmi10-n;src:'), true)
+check('an unterminated style= reference follows',
+  has(ff, 'style="font-family:cmmi10-n"'), true)
+check('no bare family left anywhere', has(ff, 'font-family:cmmi10<'), false)
+
+-- A family declared anywhere in the @font-face rule, not only first.
+local late = N([[<svg><style>@font-face{src:url(x);font-family:cmmi10}</style>]] ..
+               [[<text style="font-family:cmmi10;">y</text></svg>]], 'n')
+check('a late font-family in @font-face is collected',
+  has(late, 'font-family:cmmi10-n}'), true)
+check('…and its reference follows', has(late, 'font-family:cmmi10-n;'), true)
+
+-- A quoted family name.
+local quoted = N([[<svg><style>@font-face{font-family:"cmr10";src:url(x)}]] ..
+                 [[.a{font-family:"cmr10"}</style><text class="a"/></svg>]], 'n')
+check('a quoted family is renamed', has(quoted, 'font-family:"cmr10-n"'), true)
+check('no bare quoted family left', has(quoted, 'font-family:"cmr10"'), false)
+
+-- A class name is a selector only in CSS. The same characters inside a
+-- diagram's own label are text, and renaming them corrupts the drawing.
+local label = N([[<svg><style>.f0{fill:red}</style>]] ..
+                [[<text class="f0">version .f0 released</text></svg>]], 'n')
+check('the selector is renamed', has(label, '.f0-n{fill:red}'), true)
+check('the class attribute agrees', has(label, 'class="f0-n"'), true)
+check('but the label text is left alone',
+  has(label, '>version .f0 released<'), true)
+
+-- url(#…) in a presentation attribute, outside any stylesheet.
+local clip = N([[<svg><clipPath id="c0"/><g clip-path="url(#c0)"/></svg>]], 'n')
+check('a presentation-attribute url() follows its id',
+  has(clip, 'clip-path="url(#c0-n)"'), true)
+
 -- The root tag. `<svg[^>]*>` stopped at the first `>` whatever it was.
 local selfclosed = N([[<svg width="1"/>]], 'n', 'Alt text')
 check('a self-closing root is opened up',
@@ -112,8 +152,7 @@ check('…and its reference follows', has(pct, 'href="#a%b-n"'), true)
 
 -- as_figure: every renderer ends the same way. Three produce a RawBlock,
 -- which Figure takes directly; the <img> path produces an Image, which is an
--- Inline and needs a Plain around it. Four copies of this used to say so
--- separately.
+-- Inline and needs a Plain around it.
 local F = TIKZ_TEST.as_figure
 local RAW = pandoc.RawBlock('html', '<svg/>')
 local IMG = pandoc.Image({}, 'x.svg')

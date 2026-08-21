@@ -915,38 +915,21 @@ end
 --
 -- Inside an `<img>` an SVG is its own document: its ids, CSS classes and
 -- `@font-face` families are sandboxed. Inlined, they are page-global, and
--- every converter we support emits names that repeat from diagram to diagram.
--- Verified in a browser, two diagrams per page:
+-- every converter we support emits names that repeat from diagram to diagram,
+-- so a second diagram silently steals the first one's glyph definitions,
+-- clip paths and fonts. All three name kinds are therefore suffixed with a
+-- per-diagram nonce, and every reference form is rewritten in step.
 --
---   * pdftocairo — worst. `<use xlink:href="#glyph-0-0">` resolves to the
---     *first* diagram's glyph definitions, so a picture reading "Hello" alone
---     renders as "W X αα" beside another. `url(#clip-0)` misbinds the same way.
---   * dvisvgm — `text.f0` is redefined per diagram, so labels take a later
---     diagram's font and size: 24.8px where 9.96px was meant.
---   * dvisvgm also declares `@font-face{font-family:cmmi10}` in every diagram
---     with a *different* embedded subset each time. Chrome happens to fall
---     back across same-family faces, so this one does not currently show —
---     but nothing guarantees that, and namespacing it is free.
---
--- So all three name kinds are suffixed with a per-diagram nonce, and every
--- reference form is rewritten in step: `url(#…)`, `href="#…"` and
--- `xlink:href="#…"` (cairo uses two of the three).
+-- Rewriting is scoped to where a name can legally appear: CSS text (a
+-- `<style>` body or a `style="…"` attribute value) and specific attributes.
+-- Nothing else is touched, so a decimal in path data or a literal `.f0` in a
+-- diagram's own label cannot be mistaken for a selector.
 local function namespace_svg(svg, nonce, alt)
   -- An inlined SVG is an element, not a document: drop the XML prolog,
   -- any DOCTYPE, and the generator comments that precede the root tag.
   local root = svg:find('<svg', 1, true)
   if not root then return nil end
   svg = svg:sub(root)
-
-  -- The namespaced form of `name`, or nil when it is not one we collected —
-  -- and nil is what tells `gsub` to leave the match alone. Every pattern below
-  -- is therefore free to be written broadly: the lookup, not the pattern, is
-  -- what decides whether something is renamed.
-  local function ns(names, name)
-    if not names[name] then return nil end
-    return name .. '-' .. nonce
-  end
-  local function sub(pattern, f) svg = svg:gsub(pattern, f) end
 
   -- Collect every name first, then rewrite. Collecting as we go would read a
   -- document already half-rewritten.
@@ -955,56 +938,113 @@ local function namespace_svg(svg, nonce, alt)
     if name ~= '' then ids[name] = true end
   end
   -- A `class` attribute may carry several names, so they are collected — and
-  -- rewritten below — token by token. Treating the attribute as a single name
-  -- meant `class="f0 bold"` matched nothing while the `.f0` selector was still
-  -- renamed, silently detaching the style from the element.
+  -- rewritten below — token by token.
   for value in svg:gmatch('class%s*=%s*["\']([^"\']*)["\']') do
     for token in value:gmatch('%S+') do classes[token] = true end
   end
-  for name in svg:gmatch('@font%-face%s*{%s*font%-family%s*:%s*([%w_%-]+)') do
-    families[name] = true
+  -- The whole `@font-face` block, so the family is found wherever in the rule
+  -- it was declared rather than only as the first entry.
+  for block in svg:gmatch('@font%-face%s*(%b{})') do
+    for name in block:gmatch('font%-family%s*:%s*["\']?([%w_%-]+)') do
+      families[name] = true
+    end
   end
 
-  -- ids, and the three ways one SVG refers to another element. The name
-  -- arrives as a capture and the surroundings are rebuilt around it, so an id
-  -- that is a prefix of another (`clip-0` inside `clip-01`) cannot be
-  -- partially rewritten.
-  sub('(id%s*=%s*["\'])([^"\']*)(["\'])', function(a, name, b)
-    local t = ns(ids, name); return t and (a .. t .. b) or nil
-  end)
-  sub('url%(#([^)]*)%)', function(name)
-    local t = ns(ids, name); return t and ('url(#' .. t .. ')') or nil
-  end)
-  sub('(href%s*=%s*["\'])#([^"\']*)(["\'])', function(a, name, b)
-    local t = ns(ids, name); return t and (a .. '#' .. t .. b) or nil
-  end)
+  -- The namespaced form of `name`, or nil when it is not one we collected —
+  -- and nil is what tells `gsub` to leave the match alone. Every pattern
+  -- below is therefore free to be written broadly: the lookup, not the
+  -- pattern, decides whether something is renamed.
+  local function ns(names, name)
+    if not names[name] then return nil end
+    return name .. '-' .. nonce
+  end
 
-  -- CSS class names: the `class='f0 bold'` attribute and the `.f0` selector.
-  -- One pattern covers every selector shape — `.f0 {`, `.f0{`, and the
-  -- `.f0, .f1 {` group that the old `(%.)@(%s*{)` silently skipped while
-  -- renaming the attributes it applied to.
-  sub('(class%s*=%s*["\'])([^"\']*)(["\'])', function(a, value, b)
-    local out = {}
-    for token in value:gmatch('%S+') do out[#out + 1] = ns(classes, token) or token end
-    if #out == 0 then return nil end
-    return a .. table.concat(out, ' ') .. b
-  end)
-  sub('%.([%w_%-]+)', function(name)
-    local t = ns(classes, name); return t and ('.' .. t) or nil
-  end)
+  -- `url(#id)`, which appears both in CSS and in presentation attributes.
+  local function rewrite_urls(s)
+    return (s:gsub('url%(%s*#([^)%s]*)%s*%)', function(name)
+      local t = ns(ids, name); return t and ('url(#' .. t .. ')') or nil
+    end))
+  end
 
-  -- `@font-face` families, and both ways a family is referenced.
-  sub('(font%-family%s*:%s*)([%w_%-]+)([;}])', function(a, name, b)
-    local t = ns(families, name); return t and (a .. t .. b) or nil
-  end)
-  sub('(font%-family%s*=%s*["\'])([^"\']*)(["\'])', function(a, name, b)
-    local t = ns(families, name); return t and (a .. t .. b) or nil
-  end)
+  -- CSS text: a `<style>` body or a `style="…"` attribute value.
+  local function rewrite_css(css)
+    -- Class selectors. One pattern covers every shape — `.f0 {`, `.f0{`, and
+    -- the `.f0, .f1 {` group.
+    css = css:gsub('%.([%w_%-]+)', function(name)
+      local t = ns(classes, name); return t and ('.' .. t) or nil
+    end)
+    -- A `font-family` declaration. Anchored on the prefix rather than on a
+    -- closing `;`/`}`, so the last declaration in a `style="…"` attribute —
+    -- which is terminated by the quote — is renamed like any other. Renaming
+    -- an `@font-face` while missing a reference to it loses the font.
+    css = css:gsub('(font%-family%s*:%s*["\']?)([%w_%-]+)', function(a, name)
+      local t = ns(families, name); return t and (a .. t) or nil
+    end)
+    return rewrite_urls(css)
+  end
+
+  -- Rewrite one attribute, both quoting styles, rebuilding the surroundings
+  -- around the captured value — so a name that is a prefix of another
+  -- (`clip-0` inside `clip-01`) cannot be partially rewritten.
+  local function attr(text, name_pattern, f)
+    for _, q in ipairs { '"', "'" } do
+      text = text:gsub(
+        '(' .. name_pattern .. '%s*=%s*' .. q .. ')([^' .. q .. ']*)(' .. q .. ')', f)
+    end
+    return text
+  end
+
+  -- Markup: ids, the three ways one SVG refers to another element, class
+  -- lists, and font families named as an attribute or inside `style="…"`.
+  local function rewrite_markup(text)
+    text = attr(text, 'id', function(a, name, b)
+      local t = ns(ids, name); return t and (a .. t .. b) or nil
+    end)
+    -- `href` and `xlink:href` alike.
+    text = attr(text, '[%w:]-href', function(a, value, b)
+      local name = value:match('^#(.*)$')
+      if not name then return nil end
+      local t = ns(ids, name); return t and (a .. '#' .. t .. b) or nil
+    end)
+    text = attr(text, 'class', function(a, value, b)
+      local out = {}
+      for token in value:gmatch('%S+') do out[#out + 1] = ns(classes, token) or token end
+      if #out == 0 then return nil end
+      return a .. table.concat(out, ' ') .. b
+    end)
+    text = attr(text, 'font%-family', function(a, name, b)
+      local t = ns(families, name); return t and (a .. t .. b) or nil
+    end)
+    text = attr(text, 'style', function(a, value, b)
+      return a .. rewrite_css(value) .. b
+    end)
+    -- `clip-path="url(#…)"`, `fill="url(#…)"`, and the rest.
+    return rewrite_urls(text)
+  end
+
+  -- Split into `<style>` bodies and everything else, so each half is rewritten
+  -- by the rules that apply to it.
+  local pieces, pos = {}, 1
+  while true do
+    local open_s, open_e = svg:find('<style[^>]*>', pos)
+    -- Reject a longer element name (`<styles>`): what follows `<style` must
+    -- not continue the name.
+    while open_s and svg:sub(open_s + 6, open_s + 6):match('[%w_%-]') do
+      open_s, open_e = svg:find('<style[^>]*>', open_e + 1)
+    end
+    if not open_s then break end
+    local close_s, close_e = svg:find('</style%s*>', open_e + 1)
+    if not close_s then break end
+    pieces[#pieces + 1] = rewrite_markup(svg:sub(pos, open_e))
+    pieces[#pieces + 1] = rewrite_css(svg:sub(open_e + 1, close_s - 1))
+    pieces[#pieces + 1] = svg:sub(close_s, close_e)
+    pos = close_e + 1
+  end
+  pieces[#pieces + 1] = rewrite_markup(svg:sub(pos))
+  svg = table.concat(pieces)
 
   -- Where the root `<svg …>` tag ends: the first `>` that is not inside a
-  -- quoted attribute value. `<svg[^>]*>` stopped at the first `>` whatever it
-  -- was, so `<svg data-x="a>b">` had the <title> spliced into the middle of
-  -- the attribute.
+  -- quoted attribute value.
   local stop
   do
     local quote
@@ -1020,20 +1060,16 @@ local function namespace_svg(svg, nonce, alt)
 
   local head, rest = svg:sub(1, stop), svg:sub(stop + 1)
   -- A self-closing root has no inside to put a <title> in, so open it up.
-  -- Only an empty diagram produces one, but appending to `<svg …/>` put the
-  -- title outside the element entirely.
   if head:match('/%s*>$') then
     head = head:gsub('/%s*>$', '>')
     rest = '</svg>' .. rest
   end
 
-  -- Give the page a styling hook, and the accessibility tree a name. `<title>`
-  -- rather than `role="img"` + `aria-label`, which would hide the very text
-  -- that inlining exists to expose.
-  --
-  -- The hook is added after the renaming pass, so it is a stable page-wide
-  -- selector rather than another namespaced name. A class already on the root
-  -- has been namespaced like any other by this point; keep it and append.
+  -- Give the page a styling hook, and the accessibility tree a name.
+  -- `<title>` rather than `role="img"` + `aria-label`, which would hide the
+  -- very text that inlining exists to expose. The hook is added after the
+  -- renaming pass, so it is a stable page-wide selector rather than another
+  -- namespaced name.
   local hooked, n = head:gsub('(class%s*=%s*["\'])([^"\']*)(["\'])',
     function(a, value, b) return a .. value .. ' tikz-svg' .. b end, 1)
   if n == 0 then hooked = head:gsub('^<svg', '<svg class="tikz-svg"', 1) end
@@ -1048,17 +1084,8 @@ local function namespace_svg(svg, nonce, alt)
 end
 
 -- The shape of one LaTeX render: what the TeX run must leave behind, and
--- whether a converter then runs over it.
---
--- These were two decisions in two places, taken from overlapping inputs, and
--- they could contradict each other. `intermediate_format` chose DVI from
--- `svg-engine` alone, without knowing that under LaTeX output the intermediate
--- *is* the deliverable and no converter runs at all. So `format: pdf` together
--- with `svg-engine: dvisvgm` asked the TeX engine for a DVI and then read a PDF
--- nothing had written — every diagram in the document failing with a
--- missing-file error that named neither cause.
---
--- Deciding both here makes that unrepresentable: when nothing is converted, the
+-- whether a converter then runs over it. Both are decided here, together, so
+-- that they cannot contradict each other — when nothing is converted, the
 -- intermediate is by definition the format we deliver.
 local function pipeline_for(deliverable, svg_engine, svg_command)
   -- Under LaTeX output we embed the TeX run's own PDF directly. This skips the
