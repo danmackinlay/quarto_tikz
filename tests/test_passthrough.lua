@@ -1,4 +1,4 @@
--- Unit tests for the pure helpers behind `renderer: latex-passthrough`.
+-- Unit tests for the pure helpers behind the `latex-passthrough` option.
 -- Run from the repo root:   pandoc lua tests/test_passthrough.lua
 -- No dependencies beyond pandoc, which the extension already requires.
 

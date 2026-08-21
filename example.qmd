@@ -84,7 +84,10 @@ A fancy TikZ example
 
 ## TikZJax (client-side) renderer
 
-The same source can be rendered client-side by [TikZJax](https://github.com/artisticat1/obsidian-tikzjax) instead of compiling LaTeX locally. The block below opts in via `%%| renderer: tikzjax` — the rest of the document still uses the default `latex` renderer. The diagram is rendered by the reader's browser when this page is viewed as HTML; under PDF/docx output the block is skipped with a warning.
+`%%| renderer: tikzjax` opts one block out of the local LaTeX run and hands
+it to [TikZJax](https://github.com/artisticat1/obsidian-tikzjax), which draws
+it in the reader's browser. The circle below is the only block here doing so;
+the rest of the document still compiles locally.
 
 ```{.tikz}
 %%| renderer: tikzjax
@@ -96,17 +99,13 @@ The same source can be rendered client-side by [TikZJax](https://github.com/arti
   \draw (0,-1.2) -- (0,1.2);
 \end{tikzpicture}
 ```
+
 ## Inline SVG (`embed: inline`)
 
-By default a rendered diagram reaches the page as `<img src="….svg">`, and a
-browser renders SVG referenced that way in secure static mode: the labels are
-unselectable, invisible to find-in-page and to screen readers, and unreachable
-by the page's CSS. `%%| embed: inline` emits the SVG as markup instead, so the
-text below is real text you can select — try it.
-
-This is what makes `svg-engine: dvisvgm` worth choosing: it emits real
-`<text>` elements, and through an `<img>` that advantage is invisible. Set
-`tikz: {svg-engine: dvisvgm}` in the front-matter to see the difference.
+`%%| embed: inline` puts the SVG into the page as markup rather than behind an
+`<img>`. Try dragging across the triangle's labels below — then see the
+[README](README.md) for why an `<img>` will not let you, and what
+`svg-engine: dvisvgm` adds once you can.
 
 ```{.tikz}
 %%| embed: inline
@@ -131,11 +130,9 @@ under this document's `format: html` the block below renders through the
 normal SVG pipeline; render to `format: pdf` and the TikZ source is emitted
 into the `.tex` instead.
 
-Note that `\usetikzlibrary` is written in the block body as usual: the filter
-hoists it into the host preamble, because a library loaded inside the
-`figure` environment a captioned block becomes would be scoped to that
-environment while PGF recorded the load globally — silently breaking a later
-block.
+Note that `\usetikzlibrary` is written in the block body as usual; the filter
+quietly hoists it into the host preamble. The [README](README.md) explains why
+it has to.
 
 ```{.tikz}
 %%| latex-passthrough: true

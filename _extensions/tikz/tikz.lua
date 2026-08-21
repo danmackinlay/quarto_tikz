@@ -22,9 +22,8 @@ local function read_file (filepath)
 end
 
 local function write_file (filepath, content)
-  -- Refuse a nil payload rather than letting `fh:write` raise. Writing
-  -- nothing is always the wrong thing to do and the traceback it produced
-  -- aborted the whole render (#30).
+  -- Refuse a nil payload rather than letting `fh:write` raise: that traceback
+  -- is a genuine runtime error and would abort the whole render.
   if content == nil then return false end
   local fh = io.open(filepath, 'wb')
   if not fh then return false end
@@ -34,15 +33,9 @@ local function write_file (filepath, content)
 end
 
 -- Diagnostics. Quarto supplies `quarto.log`; plain pandoc does not, and this
--- filter is meant to work under both — `is_html_output` and `build_texinputs`
--- each carry an explicit plain-pandoc fallback. Diagnostics did not: every
--- `quarto.log.*` call site was unguarded, so under `pandoc --lua-filter` the
--- *first warning of any kind* aborted the filter with "attempt to index a nil
--- value (global 'quarto')" — including the warning that was trying to explain
--- a mistake in the user's own document.
---
--- Resolved per call rather than once at load time, because a host may install
--- the global after the chunk is loaded.
+-- filter must work under both, so every call site goes through here. The sink
+-- is resolved per call rather than once at load time, because a host may
+-- install the global after the chunk is loaded.
 local function logger(level, prefix)
   return function(message)
     local sink = quarto and quarto.log and quarto.log[level]
@@ -73,18 +66,11 @@ local function include_in_header(text, what)
   return false
 end
 
--- Whether `cmd` names something we could run, answered by searching PATH
--- ourselves and memoized for the render.
---
--- The check is worth keeping rather than folding into the first
--- `pandoc.pipe` failure, because it fails *fast*: on a machine that has TeX
--- but not Inkscape, a project with fifty diagrams should report a missing
--- converter fifty times without running LaTeX fifty times first.
---
--- Searched here rather than by asking a shell. `cmd` is metadata-controlled,
--- so it must never be interpolated into a shell command; `command -v` is a
--- POSIX builtin and does not exist under `cmd.exe`; and a subprocess per
--- diagram answers a question whose answer cannot change during a render.
+-- Whether `cmd` names something we could run: PATH is searched here rather
+-- than by asking a shell, because `cmd` is metadata-controlled and must never
+-- be interpolated into a shell command, and because `command -v` does not
+-- exist under `cmd.exe`. Memoized for the render — no document can change
+-- what is on PATH.
 local function readable(path)
   local fh = io.open(path, 'rb')
   if not fh then return false end
@@ -146,17 +132,10 @@ local function cachedir ()
   return cache_dir
 end
 
--- State belonging to one document, cleared at the top of the walk.
---
--- The filter is normally one process per render, so nothing here used to be
--- reset. A host that applied it to two documents in one process would have
--- carried the TikZJax guard, the hoisted preamble and the inline-SVG counter
--- from the first into the second — the second document silently losing its
--- `<script>` tags. Cheap to make correct, and gathering them says what their
--- lifetime is rather than leaving it to be inferred.
---
--- `executable_seen` above is deliberately *not* here: it caches what is on
--- PATH, which no document can change.
+-- State belonging to one document, cleared at the top of the walk, so a host
+-- that filters two documents in one process does not carry the first
+-- document's guards into the second. (`executable_seen` above is deliberately
+-- not here: what is on PATH outlives any one document.)
 local doc_state
 local function reset_document_state()
   doc_state = {
@@ -189,22 +168,19 @@ end
 -- code with every directive stripped.
 --
 -- That second value is what the compiler is handed, what the cache key is
--- taken over, and what the generated basename hashes. Dropping directives
--- before any of those is what keeps a presentation edit out of the cache key:
--- `%%|` lines are TeX comments, so removing them cannot change a rendered
--- byte, while every directive that does influence compilation is folded into
--- the options half of the key separately. (#28)
+-- taken over, and what the generated basename hashes — so a presentation edit
+-- stays out of the key. `%%|` lines are TeX comments and cannot change a
+-- rendered byte; the directives that do influence compilation are folded into
+-- the options half of the key separately.
 --
--- Stripping follows one rule: a directive truncates its line, and a line left
--- blank by the truncation is dropped, so an indented directive and an absent
--- one leave the same code behind.
---
--- Recognising a directive is deliberately separate from stripping one. A line
--- carrying `%%|` is always stripped, whether or not what follows parses as a
--- key — which is what stops the sub-lines of a stale nested block reappearing
--- as stray options.
---
--- A value is trimmed, and an empty one means unset.
+-- Three rules hold the whole parser together:
+--   * A directive truncates its line, and a line left blank by the truncation
+--     is dropped, so an indented directive and an absent one leave the same
+--     code behind.
+--   * A line carrying `%%|` is stripped whether or not what follows parses as
+--     a key, so the sub-lines of a stale nested block cannot reappear as
+--     stray options.
+--   * A value is trimmed, and an empty one means unset.
 local function split_directives(code)
   local props, kept = {}, {}
   for _, line in ipairs(split_lines(code)) do
@@ -233,24 +209,14 @@ local function truthy(value)
   return nil
 end
 
--- Every option the filter accepts, declared once.
---
--- There used to be five ways to read one, and which applied depended on where
--- the option was written rather than on what it meant: `normalize_enum` plus a
--- wrapper per enum for block-level values, `meta_string` / `meta_enum` for the
--- document-level half, `truthy` for one boolean, and bare Lua truthiness for
--- two more. So the same YAML meant different things at different levels:
---
---   cache: "true"               compared with `== true`  -> silently ignored
---   save-tex: "false"           compared with `or false` -> silently ENABLED
---   latex-passthrough: "false"  parsed by `truthy`       -> correctly false
+-- Every option the filter accepts, declared once and read through one reader,
+-- so that a value means the same thing wherever it was written.
 --
 -- Fields:
 --   type    'string' | 'bool' | 'enum' | 'list'
---   values  for enums, in the order the diagnostic should list them — which
---           is also what the diagnostic uses, so the message cannot drift
---           from the set it describes. It already had: the supported-values
---           strings were typed by hand beside the tables they described.
+--   values  for enums, in the order the diagnostic should list them — the
+--           diagnostic reads this table, so it cannot drift from the set it
+--           describes.
 --   scope   'doc' (the `tikz:` metadata block), 'block' (a `%%|` directive),
 --           or 'both'. Lets a directive naming a document-level option say so
 --           instead of falling through to the image-attribute catch-all.
@@ -279,9 +245,8 @@ local OPTIONS = {
   -- `{input}` expands to the intermediate PDF, `{output}` to the target SVG.
   -- Takes precedence over svg-engine; see `convert_command`.
   ['svg-command'] = { type = 'list',   scope = 'doc',
-                      -- A command that names neither placeholder would be run
-                      -- with no PDF to read and would write nothing we could
-                      -- find; a one-element `svg-command` did exactly that.
+                      -- Without both placeholders the command would run with
+                      -- no PDF to read and write nothing we could find.
                       validate = function(parts)
                         local joined = table.concat(parts, ' ')
                         for _, ph in ipairs { '{input}', '{output}' } do
@@ -295,8 +260,7 @@ local OPTIONS = {
   ['tikzjax-url'] = { type = 'string', scope = 'doc',
                       default = 'https://tikzjax.com/v1' },
   -- How a block is drawn when we have to draw it. Both pipelines are total:
-  -- either can serve any output format it supports, and neither needs to know
-  -- about the other.
+  -- either can serve any output format it supports.
   ['renderer']    = { type = 'enum',   scope = 'both', default = 'latex',
                       values = { 'latex', 'tikzjax' },
                       retired = { ['latex-passthrough'] =
@@ -318,9 +282,8 @@ local OPTIONS = {
 
 -- Every spelling that names an option, mapped to its canonical name.
 -- `additionalPackages` is the lone camelCase survivor in an otherwise
--- kebab-case vocabulary; accepting both stops the natural spelling falling
--- through to the image-attribute catch-all, where `%%| additional-packages:`
--- silently became `<img additional-packages="\usepackage{…}">`.
+-- kebab-case vocabulary; both spellings are accepted so that the natural one
+-- does not fall through to the image-attribute catch-all.
 local OPTION_NAMES = {}
 for name, spec in pairs(OPTIONS) do
   OPTION_NAMES[name] = name
@@ -333,10 +296,8 @@ end
 --
 -- `where` names the source for diagnostics ('%%| renderer:', 'tikz.renderer').
 -- The message deliberately does not name the value being fallen back *to*:
--- that belongs to the caller's chain, not here. It used to, and with
--- `tikz: {renderer: tikzjax}` in the front-matter plus a block-level
--- `%%| renderer: bogus`, the user was told they got latex and actually got
--- tikzjax.
+-- only the caller's chain knows which source answers next, so naming it here
+-- would report a value the user did not get.
 local function read_option(name, value, where)
   local spec = OPTIONS[name]
   if spec == nil or value == nil then return nil end
@@ -418,12 +379,10 @@ end
 -- fence attributes in — it is built fresh per block, so there is nothing to
 -- alias.
 --
--- The `%%| key: value` comment directives are the canonical, current syntax
--- (and match Quarto's cell-options convention). Code-block fence attributes
--- (`{.tikz filename=…}`) are the deprecated pre-1.0 form. When a key is given
--- both ways, the %%| directive wins; we only let a fence attribute through if
--- the %%| form didn't set that key, and we warn on any genuine conflict so the
--- silent override becomes visible.
+-- The `%%| key: value` directives are the canonical syntax (and match
+-- Quarto's cell-options convention); fence attributes (`{.tikz filename=…}`)
+-- are the deprecated pre-1.0 form. Set both ways, the directive wins and the
+-- conflict is warned about rather than silently resolved.
 local function diagram_options(cb, attribs)
   -- Which keys the user wrote as `%%|` directives, captured before the fence
   -- attributes are merged in. Only these are held to the option vocabulary: a
@@ -521,21 +480,15 @@ local function mime_for_format(format)
   return 'image/svg+xml'
 end
 
--- Encode an option table so it can be hashed. Not `stringify(options)`, which
--- is wrong in two ways that each end in a shared or orphaned cache entry.
+-- Encode an option table so it can be hashed. Two properties are load-bearing,
+-- and a naive `stringify(options)` has neither:
 --
--- Order. `pairs()` iteration order is unspecified by the Lua spec — stable for
--- any one build, so a pandoc upgrade that hashes keys differently would orphan
--- every cached file in every project at once. (#21)
---
--- Ambiguity. `stringify` on a table emits its *values*, concatenated with no
--- delimiter and no keys, so `{a = 'x', b = ''}` and `{a = '', b = 'x'}` hash
--- alike — different options, one entry, and whichever block renders first wins.
---
--- Sorting fixes the first; length-prefixing each key and value fixes the
--- second, including values containing the delimiters themselves. The code is
--- length-prefixed too, so a block whose text happens to end in what another
--- block's options encode to cannot collide with it.
+--   * Sorted keys. `pairs()` order is unspecified by the Lua spec — stable for
+--     any one build, so a pandoc upgrade that hashed keys differently would
+--     orphan every cached file in every project at once.
+--   * Length-prefixed keys *and* values, so `{a = 'x', b = ''}` cannot encode
+--     to the same string as `{a = '', b = 'x'}`, even when a value contains
+--     the delimiters. The code is length-prefixed for the same reason.
 local function canonical_options(options)
   local keys = {}
   for k in pairs(options) do keys[#keys + 1] = k end
@@ -553,13 +506,9 @@ end
 --
 -- `<label>.<short-hash>`: the label makes a directory listing diagnosable at a
 -- glance, and the hash — taken over the code *and* the options — keeps two
--- diagrams apart. When the basename is the auto-generated SHA1 of the code (40
--- hex chars) a short literal label is used instead, since repeating the full
--- content hash inside the name tells the reader nothing.
---
--- One function because these were once named three different ways, and only
--- the cache folded the options in — so two blocks differing only in their
--- options shared a single image file.
+-- diagrams apart. An auto-generated SHA1 basename is replaced by a short
+-- literal label, since repeating the content hash inside the name says
+-- nothing.
 local function artifact_name(basename, hash, options)
   local key = pandoc.sha1(#hash .. ':' .. hash .. canonical_options(options))
   local label = basename or 'tikz'
@@ -838,7 +787,7 @@ end
 -- fonts and sizing for free, keeps the source editable in the shipped
 -- `.tex`, and produces no figure files at all.
 --
--- Everything the standalone wrapper used to supply has to reach the host
+-- Everything a standalone wrapper would have supplied has to reach the host
 -- preamble instead: `\usepackage{tikz}` (the host document class does not
 -- load it), the block's `additionalPackages` / `header-includes`, and the
 -- `\usetikzlibrary` calls written in the body.
@@ -1126,8 +1075,8 @@ end
 
 -- The converter to run, and its arguments, for one diagram's intermediate
 -- files. Split out so the dispatch can be read — and tested — without a TeX
--- installation; it is also where `svg-command` overriding `svg-engine` is
--- decided, which is the pairing that used to disagree with the DVI request.
+-- installation. It is also where `svg-command` overriding `svg-engine` is
+-- decided — the pairing `pipeline_for` has to agree with about DVI.
 --
 -- `files` carries the paths the TeX run produced or is expected to produce:
 -- `pdf`, `dvi`, `svg`.
@@ -1164,7 +1113,7 @@ local function convert_command(conf, files)
 
   -- Inkscape default. Note: --pages=N (Inkscape 1.2+) is omitted because the
   -- standalone class always produces a single-page PDF, and dropping it
-  -- preserves compatibility with Inkscape 1.0/1.1 (issue #4).
+  -- preserves compatibility with Inkscape 1.0/1.1.
   return 'inkscape', {
     '--export-area-drawing',
     '--export-type=svg',
@@ -1311,28 +1260,17 @@ local function compile_tikz_to_svg(code, user_opts, conf, name)
   end
 end
 
--- Resolve the three orthogonal per-block axes, and derive the cache key.
+-- Resolve the three orthogonal per-block axes, and derive the cache key. The
+-- axes are independent by construction — `renderer` says *how* a block is
+-- drawn, `latex-passthrough` says *whether* to draw it at all, and `embed`
+-- says how the result reaches an HTML page; each is declared in `OPTIONS`
+-- above.
 --
--- The axes are independent by construction:
---
---   * `renderer`           — *how* a block is drawn when we have to draw it:
---                            'latex' (the TeX + svg-engine chain) or
---                            'tikzjax' (a <script type="text/tikz"> the
---                            reader's browser renders).
---   * `latex-passthrough`  — *whether* to draw it at all. Under LaTeX output
---                            the host document can typeset the picture
---                            itself, so we hand over the source. Deliberately
---                            not a renderer value: it applies to exactly one
---                            output family, and on every other format
---                            `renderer` already says what should happen.
---   * `embed`              — how a rendered SVG reaches an HTML page. Changes
---                            the delivery, never the bytes.
---
--- `key_opts` is a *separate table*, not `user_opt` with keys deleted from it,
--- and it is built from the *resolved* values. That is the whole point of this
--- function: a raw directive can only reach the key by being copied there, so a
--- no-op `%%| renderer: latex` — or a value that was rejected and warned about
--- — cannot mint a second cache entry for a byte-identical image. (#28)
+-- `key_opts` is a *separate table* built from the *resolved* values, never
+-- `user_opt` with keys deleted. A raw directive can therefore only reach the
+-- key by being copied there, so a no-op `%%| renderer: latex` — or a value
+-- that was rejected and warned about — cannot mint a second cache entry for a
+-- byte-identical image.
 local function resolve_axes(user_opt, conf)
   local renderer = resolve_option('renderer', user_opt, conf)
   local passthrough = resolve_option('latex-passthrough', user_opt, conf)
@@ -1441,7 +1379,7 @@ local function code_to_figure(conf)
       -- runtime error in the filter itself, which — unlike `error()`, see the
       -- note on `compile_tikz_to_svg` — really does propagate under Quarto.
       -- Either way one diagram must not take down the render: log it, leave
-      -- the block as its source, and let the document through. (#30)
+      -- the block as its source, and let the document through.
       local ok, result, extra = pcall(function()
         return compile_tikz_to_svg(code, compile_opts, conf, name)
       end)
@@ -1548,11 +1486,7 @@ local function configure (meta)
   local raw = meta.tikz or {}
   meta.tikz = nil  -- Remove tikz metadata to avoid processing it further
 
-  -- Every document-level option, through the one schema-driven reader. This
-  -- was fifteen hand-written reads in four different styles, which is how
-  -- `cache: "true"` came to be silently ignored while `save-tex: "false"`
-  -- silently switched save-tex on.
-  --
+  -- Every document-level option, through the one schema-driven reader.
   -- `conf` is keyed by canonical option name, so the spelling of a field says
   -- what it is: hyphens for something the user wrote, underscores for
   -- something we derived from it below.

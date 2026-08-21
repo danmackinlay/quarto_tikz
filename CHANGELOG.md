@@ -6,8 +6,8 @@ Notable changes to the `tikz` Quarto extension. Versions are the
 
 ## 1.7.0
 
-One option removed, and one `%%|` parser where there were three. No new
-options.
+One option removed, one `%%|` parser where there were three, and a round of
+fixes to inline SVG embedding. No new options.
 
 ### Fixed
 
@@ -66,6 +66,22 @@ options.
   required a literal ": ".
 - Under `latex-passthrough`, a directive sharing its line with code is no longer
   emitted verbatim into the shipped `.tex`.
+- **`embed: inline` could lose a diagram's font, and could corrupt its own
+  labels.** Three faults, all from rewriting names by pattern across the whole
+  document rather than by where a name can legally appear. A `@font-face`
+  family was renamed while a reference to it in `style="font-family:…"` was
+  not — there the closing quote ends the declaration, and only a `;` or `}`
+  was recognised — so the text asked for a family that no longer existed and
+  silently fell back. An `@font-face` rule declaring `font-family` after `src`
+  was not recognised at all, so its family was never namespaced and two
+  diagrams could still collide through it. And a class name occurring in a
+  diagram's *own label text* — `.f0` inside `version .f0 released` — was
+  rewritten as though it were a selector, corrupting the rendered text.
+  Rewriting is now scoped to CSS text (a `<style>` body or a `style="…"`
+  value) and to named attributes, and nothing else is touched; quoted family
+  names are handled as well.
+- A `.tex` file that could not be written now says so, rather than surfacing
+  one step later as a LaTeX error about a file that was never there.
 
 - **A quoted boolean meant different things at different levels.** Options
   were read five different ways depending on where they were written, so
@@ -118,10 +134,29 @@ options.
   22.0 ms to 3.7 ms on a 69 KB `pdftocairo` SVG.
 - The test suites share one assertion helper (`tests/harness.lua`) instead of
   each carrying its own copy, and two new suites cover the directive parser,
-  the option router and the document-level configuration. 154 checks to 276.
+  the option router and the document-level configuration. 154 checks to 302,
+  the latest of them pinning the inline-SVG scoping rules above and the
+  option-precedence chain.
+- A diagram's artifact name is derived once per render instead of three times.
+  The cache lookup, the cache write and the mediabag entry each recomputed it
+  from the same `(basename, code, options)` triple — a canonical encoding and
+  a SHA1 apiece; they now take the name already in hand.
+- One idea of what a loader call is. `latex-passthrough`'s move pass and its
+  copy pass each carried their own matcher, which disagreed about whitespace
+  between a macro and its argument; the move pass is now expressed in terms of
+  the scanner the copy pass uses.
 - Source comments no longer retell incidents the CHANGELOG already records;
   what remains is the reasoning a maintainer would otherwise have to
   rediscover.
+- The README is a third shorter (961 lines to 777). The "Known bugs" section
+  is gone — it restated "Captions and cross-references" in full — the 1.0.0
+  upgrade guide is a table rather than 96 lines of prose, and the explanations
+  that appeared in two or three places each now appear once. Two stale spots
+  went with it: the only image in the file was a broken link, and the upgrade
+  example still set `%%| format: svg`, an option that has not existed for
+  several releases and now warns.
+- `example.qmd` explains what each block demonstrates and leaves the reasoning
+  to the README, rather than repeating it.
 - `example.qmd` no longer sets `save-tex` and `tex-dir`, so rendering it leaves
   no `tikz-tex/` directory behind for anyone who copies its front-matter.
 
