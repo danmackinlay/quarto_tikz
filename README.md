@@ -366,13 +366,12 @@ diagram each file came from, and two blocks sharing an explicit
 `filename` still get a file each.
 
 > [!NOTE]
-> **Upgrading rekeys the cache.** 1.5.0 changed the encoding, and 1.6.1
-> moved any block carrying a `%%| renderer:` directive; either way the
-> first render after upgrading recompiles every diagram and orphans the
-> old entries, which are harmless — `rm -rf` the cache dir to tidy up.
-> If you commit an in-tree `cache-dir`, do that render on a machine that
-> has TeX and expect one large diff, or a TeX-less build host will fail
-> on the next build. See [CHANGELOG.md](CHANGELOG.md).
+> A release that changes the key rekeys the cache: the first render
+> after upgrading recompiles every diagram and orphans the old entries,
+> which are harmless — `rm -rf` the cache dir to tidy up. If you commit
+> an in-tree `cache-dir`, do that render on a machine that has TeX and
+> expect one large diff, or a TeX-less build host will fail on the next
+> build. [CHANGELOG.md](CHANGELOG.md) says which releases did.
 
 `tikz.cache-dir: <path>` overrides the location. For solo local
 development leave it unset; the user-level default is what you want.
